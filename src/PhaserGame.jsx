@@ -28,6 +28,28 @@ class HelloWorldScene extends Phaser.Scene {
     this.otherPlayers = {};
     this.player = this.add.rectangle(width / 2, height / 2, 50, 50, 0x00ffff);
     this.statusText = this.add.text(10, 10, 'Connecting...', { fontSize: '14px', color: '#ffff00' });
+
+    this.facing = 'right';
+    this.maxHp = 100;
+    this.nextAttackTime = 0;
+  }
+
+  showAttackEffect(x, y, direction) {
+    const offset = direction === 'left' ? -40 : 40;
+    const swing = this.add.rectangle(x + offset, y, 40, 50, 0xffff00, 0.6);
+    this.tweens.add({
+      targets: swing,
+      alpha: 0,
+      duration: 150,
+      onComplete: () => swing.destroy(),
+    });
+  }
+
+  setHpBar(hp) {
+    const bottomY = 550;
+    const newHeight = 500 * (hp / this.maxHp);
+    this.curhp.height = newHeight;
+    this.curhp.y = bottomY - newHeight / 2;
   }
 
   setupRoom(room) {
@@ -65,16 +87,38 @@ class HelloWorldScene extends Phaser.Scene {
         delete this.otherPlayers[sessionId];
       }
     });
+
+    this.room.onMessage('playerAttacked', ({ sessionId, direction }) => {
+      if (sessionId === this.room.sessionId) return;
+      const other = this.otherPlayers[sessionId];
+      if (other) this.showAttackEffect(other.x, other.y, direction);
+    });
+
+    this.room.onMessage('playerHit', ({ sessionId, hp }) => {
+      if (sessionId === this.room.sessionId) {
+        this.setHpBar(hp);
+      }
+    });
+
+    this.room.onMessage('playerRespawned', ({ sessionId, x, y, hp }) => {
+      if (sessionId === this.room.sessionId) {
+        this.player.x = x;
+        this.player.y = y;
+        this.setHpBar(hp);
+      } else if (this.otherPlayers[sessionId]) {
+        this.otherPlayers[sessionId].x = x;
+        this.otherPlayers[sessionId].y = y;
+      }
+    });
   }
 
-  update() {
+  update(time) {
     let moved = false;
 
-    if (this.cursors.left.isDown || this.wasd.left.isDown) { this.player.x -= 3; moved = true; }
-    if (this.cursors.right.isDown || this.wasd.right.isDown) { this.player.x += 3; moved = true; }
+    if (this.cursors.left.isDown || this.wasd.left.isDown) { this.player.x -= 3; moved = true; this.facing = 'left'; }
+    if (this.cursors.right.isDown || this.wasd.right.isDown) { this.player.x += 3; moved = true; this.facing = 'right'; }
     if (this.cursors.up.isDown || this.wasd.up.isDown) { this.player.y -= 3; moved = true; }
     if (this.cursors.down.isDown || this.wasd.down.isDown) { this.player.y += 3; moved = true; }
-
     const hw = this.player.width / 2;
     const hh = this.player.height / 2;
     this.player.x = Phaser.Math.Clamp(this.player.x, hw, this.scale.width - hw);
@@ -82,6 +126,13 @@ class HelloWorldScene extends Phaser.Scene {
 
     if (moved && this.room) {
       this.room.send('move', { x: this.player.x, y: this.player.y });
+    }
+
+    const attackPressed = Phaser.Input.Keyboard.JustDown(this.attackleft.basic) || Phaser.Input.Keyboard.JustDown(this.attackright.basic);
+    if (attackPressed && this.room && time > this.nextAttackTime) {
+      this.nextAttackTime = time + 500;
+      this.room.send('attack', { direction: this.facing });
+      this.showAttackEffect(this.player.x, this.player.y, this.facing);
     }
   }
 }
