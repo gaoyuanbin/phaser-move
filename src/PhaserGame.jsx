@@ -5,6 +5,10 @@ import * as Colyseus from 'colyseus.js';
 const COLYSEUS_URL = import.meta.env.VITE_COLYSEUS_URL || 'ws://localhost:2567';
 const ARENAS_URL = import.meta.env.VITE_ARENAS_URL || COLYSEUS_URL.replace(/^ws/, 'http') + '/arenas';
 
+const SELF_COLOR = 0x00ffff;
+const OTHER_COLOR = 0xff4444;
+const IT_COLOR = 0xffff00;
+
 class HelloWorldScene extends Phaser.Scene {
   constructor() {
     super({ key: 'HelloWorldScene' });
@@ -45,12 +49,13 @@ class HelloWorldScene extends Phaser.Scene {
       basic: Phaser.Input.Keyboard.KeyCodes.FORWARD_SLASH,
     })
     this.otherPlayers = {};
-    this.player = this.add.rectangle(width / 2, height / 2, 50, 50, 0x00ffff);
+    this.player = this.add.rectangle(width / 2, height / 2, 50, 50, SELF_COLOR);
     this.statusText = this.add.text(10, 10, 'Connecting...', { fontSize: '14px', color: '#ffff00' });
 
     this.facing = 'right';
     this.maxHp = 100;
     this.nextAttackTime = 0;
+    this.itSessionId = null;
 
     if (this.room) {
       this.setupRoom(this.room);
@@ -75,6 +80,18 @@ class HelloWorldScene extends Phaser.Scene {
     this.curhp.y = bottomY - newHeight / 2;
   }
 
+  colorForPlayer(sessionId) {
+    if (sessionId === this.itSessionId) return IT_COLOR;
+    return sessionId === this.room?.sessionId ? SELF_COLOR : OTHER_COLOR;
+  }
+
+  updateItColors() {
+    this.player.fillColor = this.colorForPlayer(this.room?.sessionId);
+    for (const [sessionId, rect] of Object.entries(this.otherPlayers)) {
+      rect.fillColor = this.colorForPlayer(sessionId);
+    }
+  }
+
   setupRoom(room) {
     this.room = room;
     this.roomKind = 'default';
@@ -85,7 +102,7 @@ class HelloWorldScene extends Phaser.Scene {
     this.room.onMessage('playerJoined', ({ sessionId }) => {
       if (sessionId === this.room.sessionId) return;
       if (!this.otherPlayers[sessionId]) {
-        this.otherPlayers[sessionId] = this.add.rectangle(this.scale.width / 2, this.scale.height / 2, 50, 50, 0xff4444);
+        this.otherPlayers[sessionId] = this.add.rectangle(this.scale.width / 2, this.scale.height / 2, 50, 50, this.colorForPlayer(sessionId));
         this.room.send('sayHi', { x: this.player.x, y: this.player.y });
       }
       console.log('players:', [this.room.sessionId, ...Object.keys(this.otherPlayers)]);
@@ -94,14 +111,17 @@ class HelloWorldScene extends Phaser.Scene {
     this.room.onMessage('playerSaidHi', ({ sessionId, x, y }) => {
       if (sessionId === this.room.sessionId) return;
       if (!this.otherPlayers[sessionId]) {
-        this.otherPlayers[sessionId] = this.add.rectangle(x, y, 50, 50, 0xff4444);
+        this.otherPlayers[sessionId] = this.add.rectangle(x, y, 50, 50, this.colorForPlayer(sessionId));
+      } else {
+        this.otherPlayers[sessionId].x = x;
+        this.otherPlayers[sessionId].y = y;
       }
     });
 
     this.room.onMessage('playerMoved', ({ sessionId, x, y }) => {
       if (sessionId === this.room.sessionId) return;
       if (!this.otherPlayers[sessionId]) {
-        this.otherPlayers[sessionId] = this.add.rectangle(this.scale.width / 2, this.scale.height / 2, 50, 50, 0xff4444);
+        this.otherPlayers[sessionId] = this.add.rectangle(this.scale.width / 2, this.scale.height / 2, 50, 50, this.colorForPlayer(sessionId));
       }
       this.otherPlayers[sessionId].x = x;
       this.otherPlayers[sessionId].y = y;
@@ -112,6 +132,16 @@ class HelloWorldScene extends Phaser.Scene {
         this.otherPlayers[sessionId].destroy();
         delete this.otherPlayers[sessionId];
       }
+    });
+
+    this.room.onMessage('itStatus', ({ sessionId }) => {
+      this.itSessionId = sessionId;
+      this.updateItColors();
+    });
+
+    this.room.onMessage('itChanged', ({ sessionId }) => {
+      this.itSessionId = sessionId;
+      this.updateItColors();
     });
 
     this.room.onMessage('playerAttacked', ({ sessionId, direction }) => {
@@ -136,6 +166,12 @@ class HelloWorldScene extends Phaser.Scene {
         this.otherPlayers[sessionId].y = y;
       }
     });
+
+    // Announce ourselves now that our handlers are mounted, so the server can
+    // reply directly with everyone already in the room (see HelloRoom's "sayHi" handler) -
+    // waiting on other clients to react to our "playerJoined" broadcast is racy,
+    // since that can arrive before our own handlers are ready.
+    this.room.send('sayHi', { x: this.player.x, y: this.player.y });
   }
 
   update(time) {
@@ -235,6 +271,19 @@ export default function PhaserGame() {
     }
   };
 
+  const joinTagGame = async () => {
+    setBusy(true); setError('');
+    try {
+      setRoom(await client.joinOrCreate('tag_room'));
+      setRoomKind('tag');
+    } catch (e) {
+      console.error('Failed to join tag game:', e);
+      setError('Could not join the tag game.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const joinArena = async (roomId) => {
     setBusy(true); setError('');
     try {
@@ -296,6 +345,10 @@ export default function PhaserGame() {
         <h2>Main Lobby</h2>
         <p style={{ opacity: 0.7, fontSize: 14 }}>One shared room. Attacking is disabled here.</p>
         <button disabled={busy} onClick={joinMainLobby}>Join Main Lobby</button>
+
+        <h2 style={{ marginTop: 32 }}>Tag</h2>
+        <p style={{ opacity: 0.7, fontSize: 14 }}>One shared room. Whoever's "it" (yellow) tags the next by touch.</p>
+        <button disabled={busy} onClick={joinTagGame}>Join Tag Game</button>
 
         <h2 style={{ marginTop: 32 }}>Arenas</h2>
         <p style={{ opacity: 0.7, fontSize: 14 }}>Small rooms, up to 8 players, attacking enabled. Anyone can create one.</p>
