@@ -9,6 +9,10 @@ const SELF_COLOR = 0x00ffff;
 const OTHER_COLOR = 0xff4444;
 const IT_COLOR = 0xffff00;
 
+const DASH_SPEED = 12;
+const DASH_DURATION_MS = 150;
+const DASH_END_LAG_MS = 250;
+
 class HelloWorldScene extends Phaser.Scene {
   constructor() {
     super({ key: 'HelloWorldScene' });
@@ -48,6 +52,7 @@ class HelloWorldScene extends Phaser.Scene {
     this.attackright = this.input.keyboard.addKeys({
       basic: Phaser.Input.Keyboard.KeyCodes.FORWARD_SLASH,
     })
+    this.dashKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
     this.otherPlayers = {};
     this.player = this.add.rectangle(width / 2, height / 2, 50, 50, SELF_COLOR);
     this.statusText = this.add.text(10, 10, 'Connecting...', { fontSize: '14px', color: '#ffff00' });
@@ -55,6 +60,9 @@ class HelloWorldScene extends Phaser.Scene {
     this.facing = 'right';
     this.maxHp = 100;
     this.nextAttackTime = 0;
+    this.dashEndTime = 0;
+    this.actionLockEndTime = 0;
+    this.dashDirection = 1;
     this.itSessionId = null;
 
     if (this.room) {
@@ -70,6 +78,16 @@ class HelloWorldScene extends Phaser.Scene {
       alpha: 0,
       duration: 150,
       onComplete: () => swing.destroy(),
+    });
+  }
+
+  showDashEffect(x, y) {
+    const trail = this.add.rectangle(x, y, 50, 50, 0x66ccff, 0.5);
+    this.tweens.add({
+      targets: trail,
+      alpha: 0,
+      duration: DASH_END_LAG_MS,
+      onComplete: () => trail.destroy(),
     });
   }
 
@@ -176,11 +194,18 @@ class HelloWorldScene extends Phaser.Scene {
 
   update(time) {
     let moved = false;
+    const dashing = time < this.dashEndTime;
+    const locked = time < this.actionLockEndTime;
 
-    if (this.cursors.left.isDown || this.wasd.left.isDown) { this.player.x -= 3; moved = true; this.facing = 'left'; }
-    if (this.cursors.right.isDown || this.wasd.right.isDown) { this.player.x += 3; moved = true; this.facing = 'right'; }
-    if (this.cursors.up.isDown || this.wasd.up.isDown) { this.player.y -= 3; moved = true; }
-    if (this.cursors.down.isDown || this.wasd.down.isDown) { this.player.y += 3; moved = true; }
+    if (dashing) {
+      this.player.x += DASH_SPEED * this.dashDirection;
+      moved = true;
+    } else if (!locked) {
+      if (this.cursors.left.isDown || this.wasd.left.isDown) { this.player.x -= 3; moved = true; this.facing = 'left'; }
+      if (this.cursors.right.isDown || this.wasd.right.isDown) { this.player.x += 3; moved = true; this.facing = 'right'; }
+      if (this.cursors.up.isDown || this.wasd.up.isDown) { this.player.y -= 3; moved = true; }
+      if (this.cursors.down.isDown || this.wasd.down.isDown) { this.player.y += 3; moved = true; }
+    }
     const hw = this.player.width / 2;
     const hh = this.player.height / 2;
     this.player.x = Phaser.Math.Clamp(this.player.x, hw, this.scale.width - hw);
@@ -191,10 +216,17 @@ class HelloWorldScene extends Phaser.Scene {
     }
 
     const attackPressed = Phaser.Input.Keyboard.JustDown(this.attackleft.basic) || Phaser.Input.Keyboard.JustDown(this.attackright.basic);
-    if (attackPressed && this.room && time > this.nextAttackTime && this.roomKind === "arena") {
+    if (attackPressed && this.room && !locked && time > this.nextAttackTime && this.roomKind === "arena") {
       this.nextAttackTime = time + 500;
       this.room.send('attack', { direction: this.facing });
       this.showAttackEffect(this.player.x, this.player.y, this.facing);
+    }
+
+    if (!locked && Phaser.Input.Keyboard.JustDown(this.dashKey)) {
+      this.dashDirection = this.facing === 'left' ? -1 : 1;
+      this.dashEndTime = time + DASH_DURATION_MS;
+      this.actionLockEndTime = this.dashEndTime + DASH_END_LAG_MS;
+      this.showDashEffect(this.player.x, this.player.y);
     }
 
     if (!this.doorTriggered && this.onDoor && Phaser.Geom.Intersects.RectangleToRectangle(this.player.getBounds(), this.door.getBounds())) {
