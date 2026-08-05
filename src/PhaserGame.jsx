@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import Phaser from 'phaser';
 import * as Colyseus from 'colyseus.js';
-
+import styles from './buttons.module.css';
 const COLYSEUS_URL = import.meta.env.VITE_COLYSEUS_URL || 'ws://localhost:2567';
 const ARENAS_URL = import.meta.env.VITE_ARENAS_URL || COLYSEUS_URL.replace(/^ws/, 'http') + '/arenas';
 
@@ -376,22 +376,23 @@ export default function PhaserGame() {
       <div style={{ color: '#fff', fontFamily: 'sans-serif', padding: 20, maxWidth: 480 }}>
         <h2>Main Lobby</h2>
         <p style={{ opacity: 0.7, fontSize: 14 }}>One shared room. Attacking is disabled here.</p>
-        <button disabled={busy} onClick={joinMainLobby}>Join Main Lobby</button>
+        <button className = {styles.menu} disabled={busy} onClick={joinMainLobby}>Join Main Lobby</button>
 
         <h2 style={{ marginTop: 32 }}>Tag</h2>
         <p style={{ opacity: 0.7, fontSize: 14 }}>One shared room. Whoever's "it" (yellow) tags the next by touch.</p>
-        <button disabled={busy} onClick={joinTagGame}>Join Tag Game</button>
+        <button className={styles.menu} disabled={busy} onClick={joinTagGame}>Join Tag Game</button>
 
         <h2 style={{ marginTop: 32 }}>Arenas</h2>
         <p style={{ opacity: 0.7, fontSize: 14 }}>Small rooms, up to 8 players, attacking enabled. Anyone can create one.</p>
-        <button disabled={busy} onClick={createArena}>Create New Arena</button>
-        <button disabled={busy} onClick={refreshArenas} style={{ marginLeft: 8 }}>Refresh</button>
+        <button className={styles.menu} disabled={busy} onClick={createArena}>Create New Arena</button>
+        <button className={styles.menu} disabled={busy} onClick={refreshArenas} style={{ marginLeft: 8 }}>Refresh</button>
 
         <ul style={{ paddingLeft: 20 }}>
           {arenas.map((a) => (
             <li key={a.roomId} style={{ marginBottom: 6 }}>
               {a.name || 'Arena'} ({a.roomId.slice(0, 6)}) — {a.clients}/{a.maxClients} players
               <button
+                  className={styles.menu}
                 style={{ marginLeft: 8 }}
                 disabled={busy || a.clients >= a.maxClients}
                 onClick={() => joinArena(a.roomId)}
