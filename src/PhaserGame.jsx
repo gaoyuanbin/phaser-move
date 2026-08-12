@@ -13,6 +13,10 @@ const DASH_SPEED = 12;
 const DASH_DURATION_MS = 150;
 const DASH_END_LAG_MS = 250;
 
+const HP_BAR_WIDTH = 50;
+const HP_BAR_HEIGHT = 6;
+const HP_BAR_OFFSET_Y = 35;
+
 class HelloWorldScene extends Phaser.Scene {
   constructor() {
     super({ key: 'HelloWorldScene' });
@@ -37,8 +41,8 @@ class HelloWorldScene extends Phaser.Scene {
       { fontSize: '10px', color: '#ffffff' }
     );
 
-    this.hpbar = this.add.rectangle(25, 300, 50, 500, 0x222222);
-    this.curhp = this.add.rectangle(25, 300, 50, 500, 0x22ff22);
+    this.hpbar = this.add.rectangle(width / 2, height / 2 + HP_BAR_OFFSET_Y, HP_BAR_WIDTH, HP_BAR_HEIGHT, 0x222222);
+    this.curhp = this.add.rectangle(width / 2, height / 2 + HP_BAR_OFFSET_Y, HP_BAR_WIDTH, HP_BAR_HEIGHT, 0x22ff22);
     this.cursors = this.input.keyboard.createCursorKeys();
     this.wasd = this.input.keyboard.addKeys({
       up: Phaser.Input.Keyboard.KeyCodes.W,
@@ -92,10 +96,7 @@ class HelloWorldScene extends Phaser.Scene {
   }
 
   setHpBar(hp) {
-    const bottomY = 550;
-    const newHeight = 500 * (hp / this.maxHp);
-    this.curhp.height = newHeight;
-    this.curhp.y = bottomY - newHeight / 2;
+    this.curhp.setDisplaySize(HP_BAR_WIDTH * (hp / this.maxHp), HP_BAR_HEIGHT);
   }
 
   colorForPlayer(sessionId) {
@@ -105,14 +106,36 @@ class HelloWorldScene extends Phaser.Scene {
 
   updateItColors() {
     this.player.fillColor = this.colorForPlayer(this.room?.sessionId);
-    for (const [sessionId, rect] of Object.entries(this.otherPlayers)) {
-      rect.fillColor = this.colorForPlayer(sessionId);
+    for (const [sessionId, other] of Object.entries(this.otherPlayers)) {
+      other.rect.fillColor = this.colorForPlayer(sessionId);
     }
+  }
+
+  createOtherPlayer(sessionId, x, y) {
+    const rect = this.add.rectangle(x, y, 50, 50, this.colorForPlayer(sessionId));
+    const hpBg = this.add.rectangle(x, y + HP_BAR_OFFSET_Y, HP_BAR_WIDTH, HP_BAR_HEIGHT, 0x222222);
+    const hpFill = this.add.rectangle(x, y + HP_BAR_OFFSET_Y, HP_BAR_WIDTH, HP_BAR_HEIGHT, 0x22ff22);
+    const other = { rect, hpBg, hpFill };
+    this.otherPlayers[sessionId] = other;
+    return other;
+  }
+
+  positionOtherPlayer(other, x, y) {
+    other.rect.x = x;
+    other.rect.y = y;
+    other.hpBg.x = x;
+    other.hpBg.y = y + HP_BAR_OFFSET_Y;
+    other.hpFill.y = y + HP_BAR_OFFSET_Y;
+    other.hpFill.x = x - (HP_BAR_WIDTH - other.hpFill.displayWidth) / 2;
+  }
+
+  setOtherPlayerHp(other, hp) {
+    other.hpFill.setDisplaySize(HP_BAR_WIDTH * (hp / this.maxHp), HP_BAR_HEIGHT);
+    other.hpFill.x = other.rect.x - (HP_BAR_WIDTH - other.hpFill.displayWidth) / 2;
   }
 
   setupRoom(room) {
     this.room = room;
-    this.roomKind = 'default';
     this.statusText.setText('Connected');
     this.room.onMessage("imroom", (data) => {
       this.roomKind = data.roomtype;
@@ -120,7 +143,7 @@ class HelloWorldScene extends Phaser.Scene {
     this.room.onMessage('playerJoined', ({ sessionId }) => {
       if (sessionId === this.room.sessionId) return;
       if (!this.otherPlayers[sessionId]) {
-        this.otherPlayers[sessionId] = this.add.rectangle(this.scale.width / 2, this.scale.height / 2, 50, 50, this.colorForPlayer(sessionId));
+        this.createOtherPlayer(sessionId, this.scale.width / 2, this.scale.height / 2);
         this.room.send('sayHi', { x: this.player.x, y: this.player.y });
       }
       console.log('players:', [this.room.sessionId, ...Object.keys(this.otherPlayers)]);
@@ -129,25 +152,24 @@ class HelloWorldScene extends Phaser.Scene {
     this.room.onMessage('playerSaidHi', ({ sessionId, x, y }) => {
       if (sessionId === this.room.sessionId) return;
       if (!this.otherPlayers[sessionId]) {
-        this.otherPlayers[sessionId] = this.add.rectangle(x, y, 50, 50, this.colorForPlayer(sessionId));
+        this.createOtherPlayer(sessionId, x, y);
       } else {
-        this.otherPlayers[sessionId].x = x;
-        this.otherPlayers[sessionId].y = y;
+        this.positionOtherPlayer(this.otherPlayers[sessionId], x, y);
       }
     });
 
     this.room.onMessage('playerMoved', ({ sessionId, x, y }) => {
       if (sessionId === this.room.sessionId) return;
-      if (!this.otherPlayers[sessionId]) {
-        this.otherPlayers[sessionId] = this.add.rectangle(this.scale.width / 2, this.scale.height / 2, 50, 50, this.colorForPlayer(sessionId));
-      }
-      this.otherPlayers[sessionId].x = x;
-      this.otherPlayers[sessionId].y = y;
+      const other = this.otherPlayers[sessionId] || this.createOtherPlayer(sessionId, this.scale.width / 2, this.scale.height / 2);
+      this.positionOtherPlayer(other, x, y);
     });
 
     this.room.onMessage('playerLeft', ({ sessionId }) => {
-      if (this.otherPlayers[sessionId]) {
-        this.otherPlayers[sessionId].destroy();
+      const other = this.otherPlayers[sessionId];
+      if (other) {
+        other.rect.destroy();
+        other.hpBg.destroy();
+        other.hpFill.destroy();
         delete this.otherPlayers[sessionId];
       }
     });
@@ -165,12 +187,14 @@ class HelloWorldScene extends Phaser.Scene {
     this.room.onMessage('playerAttacked', ({ sessionId, direction }) => {
       if (sessionId === this.room.sessionId) return;
       const other = this.otherPlayers[sessionId];
-      if (other) this.showAttackEffect(other.x, other.y, direction);
+      if (other) this.showAttackEffect(other.rect.x, other.rect.y, direction);
     });
 
     this.room.onMessage('playerHit', ({ sessionId, hp }) => {
       if (sessionId === this.room.sessionId) {
         this.setHpBar(hp);
+      } else if (this.otherPlayers[sessionId]) {
+        this.setOtherPlayerHp(this.otherPlayers[sessionId], hp);
       }
     });
 
@@ -180,8 +204,9 @@ class HelloWorldScene extends Phaser.Scene {
         this.player.y = y;
         this.setHpBar(hp);
       } else if (this.otherPlayers[sessionId]) {
-        this.otherPlayers[sessionId].x = x;
-        this.otherPlayers[sessionId].y = y;
+        const other = this.otherPlayers[sessionId];
+        this.positionOtherPlayer(other, x, y);
+        this.setOtherPlayerHp(other, hp);
       }
     });
 
@@ -210,6 +235,12 @@ class HelloWorldScene extends Phaser.Scene {
     const hh = this.player.height / 2;
     this.player.x = Phaser.Math.Clamp(this.player.x, hw, this.scale.width - hw);
     this.player.y = Phaser.Math.Clamp(this.player.y, hh, this.scale.height - hh);
+
+    const hpBarY = this.player.y + HP_BAR_OFFSET_Y;
+    this.hpbar.x = this.player.x;
+    this.hpbar.y = hpBarY;
+    this.curhp.y = hpBarY;
+    this.curhp.x = this.player.x - (HP_BAR_WIDTH - this.curhp.displayWidth) / 2;
 
     if (moved && this.room) {
       this.room.send('move', { x: this.player.x, y: this.player.y });
