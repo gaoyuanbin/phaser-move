@@ -407,16 +407,17 @@ export default function PhaserGame() {
       <div style={{ color: '#fff', fontFamily: 'sans-serif', padding: 20, maxWidth: 480 }}>
         <h2>Main Lobby</h2>
         <p style={{ opacity: 0.7, fontSize: 14 }}>One shared room. Attacking is disabled here.</p>
-        <button className = {styles.menu} disabled={busy} onClick={joinMainLobby}>Join Main Lobby</button>
+        <button className = {styles.menu} disabled={busy} onClick={joinMainLobby}>{busy ? 'Connecting…' : 'Join Main Lobby'}</button>
 
         <h2 style={{ marginTop: 32 }}>Tag</h2>
         <p style={{ opacity: 0.7, fontSize: 14 }}>One shared room. Whoever's "it" (yellow) tags the next by touch.</p>
-        <button className={styles.menu} disabled={busy} onClick={joinTagGame}>Join Tag Game</button>
+        <button className={styles.menu} disabled={busy} onClick={joinTagGame}>{busy ? 'Connecting…' : 'Join Tag Game'}</button>
 
         <h2 style={{ marginTop: 32 }}>Arenas</h2>
         <p style={{ opacity: 0.7, fontSize: 14 }}>Small rooms, up to 8 players, attacking enabled. Anyone can create one.</p>
-        <button className={styles.menu} disabled={busy} onClick={createArena}>Create New Arena</button>
+        <button className={styles.menu} disabled={busy} onClick={createArena}>{busy ? 'Connecting…' : 'Create New Arena'}</button>
         <button className={styles.menu} disabled={busy} onClick={refreshArenas} style={{ marginLeft: 8 }}>Refresh</button>
+        {busy && <p style={{ opacity: 0.7, fontSize: 13, marginTop: 8 }}>Connecting to server… this can take up to 30s if it's been idle.</p>}
 
         <ul style={{ paddingLeft: 20 }}>
           {arenas.map((a) => (
@@ -428,7 +429,7 @@ export default function PhaserGame() {
                 disabled={busy || a.clients >= a.maxClients}
                 onClick={() => joinArena(a.roomId)}
               >
-                Join
+                {busy ? 'Connecting…' : 'Join'}
               </button>
             </li>
           ))}
