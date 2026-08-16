@@ -13,6 +13,8 @@ const DASH_SPEED = 12;
 const DASH_DURATION_MS = 150;
 const DASH_END_LAG_MS = 250;
 
+const SUPER_ATTACK_COOLDOWN_MS = 3000;
+
 const HP_BAR_WIDTH = 50;
 const HP_BAR_HEIGHT = 6;
 const HP_BAR_OFFSET_Y = 35;
@@ -52,11 +54,15 @@ class HelloWorldScene extends Phaser.Scene {
     });
     this.attackleft = this.input.keyboard.addKeys({
       basic: Phaser.Input.Keyboard.KeyCodes.E,
+      super: Phaser.Input.Keyboard.KeyCodes.R,
     })
     this.attackright = this.input.keyboard.addKeys({
       basic: Phaser.Input.Keyboard.KeyCodes.FORWARD_SLASH,
+      super: Phaser.Input.Keyboard.KeyCodes.PERIOD,
     })
     this.dashKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
+    this.dashKeyL = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.Q);
+    this.dashKeyR = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SHIFT);
     this.otherPlayers = {};
     this.player = this.add.rectangle(width / 2, height / 2, 50, 50, SELF_COLOR);
     this.statusText = this.add.text(10, 10, 'Connecting...', { fontSize: '14px', color: '#ffff00' });
@@ -81,6 +87,17 @@ class HelloWorldScene extends Phaser.Scene {
       targets: swing,
       alpha: 0,
       duration: 150,
+      onComplete: () => swing.destroy(),
+    });
+  }
+
+  showSuperEffect(x, y, direction) {
+    const offset = direction === 'left' ? -100 : 100;
+    const swing = this.add.rectangle(x+offset, y, 100, 70, 0xffff22, 0.65)
+    this.tweens.add({
+      targets: swing,
+      alpha: 0,
+      duration: 200,
       onComplete: () => swing.destroy(),
     });
   }
@@ -190,6 +207,12 @@ class HelloWorldScene extends Phaser.Scene {
       if (other) this.showAttackEffect(other.rect.x, other.rect.y, direction);
     });
 
+    this.room.onMessage('playerSuperAttacked', ({ sessionId, direction }) => {
+      if (sessionId === this.room.sessionId) return;
+      const other = this.otherPlayers[sessionId];
+      if (other) this.showSuperEffect(other.rect.x, other.rect.y, direction);
+    });
+
     this.room.onMessage('playerHit', ({ sessionId, hp }) => {
       if (sessionId === this.room.sessionId) {
         this.setHpBar(hp);
@@ -247,13 +270,19 @@ class HelloWorldScene extends Phaser.Scene {
     }
 
     const attackPressed = Phaser.Input.Keyboard.JustDown(this.attackleft.basic) || Phaser.Input.Keyboard.JustDown(this.attackright.basic);
+    const superPressed = Phaser.Input.Keyboard.JustDown(this.attackleft.super) || Phaser.Input.Keyboard.JustDown(this.attackright.super)
     if (attackPressed && this.room && !locked && time > this.nextAttackTime && this.roomKind === "arena") {
       this.nextAttackTime = time + 500;
       this.room.send('attack', { direction: this.facing });
       this.showAttackEffect(this.player.x, this.player.y, this.facing);
     }
+    if (!attackPressed && superPressed && this.room && !locked && time > this.nextAttackTime && this.roomKind === "arena") {
+      this.nextAttackTime = time + SUPER_ATTACK_COOLDOWN_MS;
+      this.room.send('superAttack', { direction: this.facing });
+      this.showSuperEffect(this.player.x, this.player.y, this.facing);
+    }
 
-    if (!locked && Phaser.Input.Keyboard.JustDown(this.dashKey)) {
+    if (!locked && (Phaser.Input.Keyboard.JustDown(this.dashKey)||Phaser.Input.Keyboard.JustDown(this.dashKeyL)||Phaser.Input.Keyboard.JustDown(this.dashKeyR))) {
       this.dashDirection = this.facing === 'left' ? -1 : 1;
       this.dashEndTime = time + DASH_DURATION_MS;
       this.actionLockEndTime = this.dashEndTime + DASH_END_LAG_MS;
