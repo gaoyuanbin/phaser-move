@@ -19,6 +19,13 @@ const HP_BAR_WIDTH = 50;
 const HP_BAR_HEIGHT = 6;
 const HP_BAR_OFFSET_Y = 35;
 
+const ENERGY_BAR_WIDTH = 50;
+const ENERGY_BAR_HEIGHT = 4;
+const ENERGY_BAR_OFFSET_Y = HP_BAR_OFFSET_Y + HP_BAR_HEIGHT + 4;
+const MAX_ENERGY = 100;
+
+const POINTER_OFFSET = 50;
+
 class HelloWorldScene extends Phaser.Scene {
   constructor() {
     super({ key: 'HelloWorldScene' });
@@ -45,6 +52,9 @@ class HelloWorldScene extends Phaser.Scene {
 
     this.hpbar = this.add.rectangle(width / 2, height / 2 + HP_BAR_OFFSET_Y, HP_BAR_WIDTH, HP_BAR_HEIGHT, 0x222222);
     this.curhp = this.add.rectangle(width / 2, height / 2 + HP_BAR_OFFSET_Y, HP_BAR_WIDTH, HP_BAR_HEIGHT, 0x22ff22);
+    this.energybar = this.add.rectangle(width / 2, height / 2 + ENERGY_BAR_OFFSET_Y, ENERGY_BAR_WIDTH, ENERGY_BAR_HEIGHT, 0x222222);
+    this.curenergy = this.add.rectangle(width / 2, height / 2 + ENERGY_BAR_OFFSET_Y, ENERGY_BAR_WIDTH, ENERGY_BAR_HEIGHT, 0xffc800);
+
     this.cursors = this.input.keyboard.createCursorKeys();
     this.wasd = this.input.keyboard.addKeys({
       up: Phaser.Input.Keyboard.KeyCodes.W,
@@ -65,9 +75,14 @@ class HelloWorldScene extends Phaser.Scene {
     this.dashKeyR = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SHIFT);
     this.otherPlayers = {};
     this.player = this.add.rectangle(width / 2, height / 2, 50, 50, SELF_COLOR);
+    this.pointer = this.add.triangle(width / 2, height / 2, 10, 0, 20, 20, 0, 20, 0xff0000);
+
     this.statusText = this.add.text(10, 10, 'Connecting...', { fontSize: '14px', color: '#ffff00' });
 
     this.facing = 'right';
+    this.pointer.rotation = this.facingAngle();
+    this.pointer.x = this.player.x + this.facingVector().x * POINTER_OFFSET;
+    this.pointer.y = this.player.y + this.facingVector().y * POINTER_OFFSET;
     this.maxHp = 100;
     this.nextAttackTime = 0;
     this.dashEndTime = 0;
@@ -92,8 +107,8 @@ class HelloWorldScene extends Phaser.Scene {
   }
 
   showSuperEffect(x, y, direction) {
-    const offset = direction === 'left' ? -100 : 100;
-    const swing = this.add.rectangle(x+offset, y, 100, 70, 0xffff22, 0.65)
+    const offset = direction === 'left' ? -90 : 90;
+    const swing = this.add.rectangle(x+offset, y, 150, 70, 0xffff22, 0.65)
     this.tweens.add({
       targets: swing,
       alpha: 0,
@@ -112,8 +127,35 @@ class HelloWorldScene extends Phaser.Scene {
     });
   }
 
+  facingAngle() {
+    // Triangle vertices (10,0),(20,20),(0,20) point "up" at rotation 0,
+    // so left/right are +-90 degrees from there. Up/down can slot in as
+    // 0 and Math.PI once those directions exist.
+    switch (this.facing) {
+      case 'left': return -Math.PI / 2;
+      case 'right': return Math.PI / 2;
+      case 'up': return 0;
+      case 'down': return Math.PI;
+      default: return Math.PI / 2;
+    }
+  }
+
+  facingVector() {
+    switch (this.facing) {
+      case 'left': return { x: -1, y: 0 };
+      case 'right': return { x: 1, y: 0 };
+      case 'up': return { x: 0, y: -1 };
+      case 'down': return { x: 0, y: 1 };
+      default: return { x: 1, y: 0 };
+    }
+  }
+
   setHpBar(hp) {
     this.curhp.setDisplaySize(HP_BAR_WIDTH * (hp / this.maxHp), HP_BAR_HEIGHT);
+  }
+
+  setEnergyBar(energy) {
+    this.curenergy.setDisplaySize(ENERGY_BAR_WIDTH * (energy / MAX_ENERGY), ENERGY_BAR_HEIGHT);
   }
 
   colorForPlayer(sessionId) {
@@ -233,6 +275,11 @@ class HelloWorldScene extends Phaser.Scene {
       }
     });
 
+    // Energy is private to each client - the server only ever sends us our own.
+    this.room.onMessage('energyUpdate', ({ energy }) => {
+      this.setEnergyBar(energy);
+    });
+
     // Announce ourselves now that our handlers are mounted, so the server can
     // reply directly with everyone already in the room (see HelloRoom's "sayHi" handler) -
     // waiting on other clients to react to our "playerJoined" broadcast is racy,
@@ -251,13 +298,18 @@ class HelloWorldScene extends Phaser.Scene {
     } else if (!locked) {
       if (this.cursors.left.isDown || this.wasd.left.isDown) { this.player.x -= 3; moved = true; this.facing = 'left'; }
       if (this.cursors.right.isDown || this.wasd.right.isDown) { this.player.x += 3; moved = true; this.facing = 'right'; }
-      if (this.cursors.up.isDown || this.wasd.up.isDown) { this.player.y -= 3; moved = true; }
-      if (this.cursors.down.isDown || this.wasd.down.isDown) { this.player.y += 3; moved = true; }
+      if (this.cursors.up.isDown || this.wasd.up.isDown) { this.player.y -= 3; moved = true; this.facing = "up"}
+      if (this.cursors.down.isDown || this.wasd.down.isDown) { this.player.y += 3; moved = true; this.facing = "down"}
     }
     const hw = this.player.width / 2;
     const hh = this.player.height / 2;
     this.player.x = Phaser.Math.Clamp(this.player.x, hw, this.scale.width - hw);
     this.player.y = Phaser.Math.Clamp(this.player.y, hh, this.scale.height - hh);
+
+    const facingVec = this.facingVector();
+    this.pointer.x = this.player.x + facingVec.x * POINTER_OFFSET;
+    this.pointer.y = this.player.y + facingVec.y * POINTER_OFFSET;
+    this.pointer.rotation = this.facingAngle();
 
     const hpBarY = this.player.y + HP_BAR_OFFSET_Y;
     this.hpbar.x = this.player.x;
@@ -265,10 +317,15 @@ class HelloWorldScene extends Phaser.Scene {
     this.curhp.y = hpBarY;
     this.curhp.x = this.player.x - (HP_BAR_WIDTH - this.curhp.displayWidth) / 2;
 
+    const energyBarY = this.player.y + ENERGY_BAR_OFFSET_Y;
+    this.energybar.x = this.player.x;
+    this.energybar.y = energyBarY;
+    this.curenergy.y = energyBarY;
+    this.curenergy.x = this.player.x - (ENERGY_BAR_WIDTH - this.curenergy.displayWidth) / 2;
+
     if (moved && this.room) {
       this.room.send('move', { x: this.player.x, y: this.player.y });
     }
-
     const attackPressed = Phaser.Input.Keyboard.JustDown(this.attackleft.basic) || Phaser.Input.Keyboard.JustDown(this.attackright.basic);
     const superPressed = Phaser.Input.Keyboard.JustDown(this.attackleft.super) || Phaser.Input.Keyboard.JustDown(this.attackright.super)
     if (attackPressed && this.room && !locked && time > this.nextAttackTime && this.roomKind === "arena") {
