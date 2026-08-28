@@ -91,6 +91,8 @@ class HelloWorldScene extends Phaser.Scene {
     this.dashKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
     this.dashKeyL = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.Q);
     this.dashKeyR = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SHIFT);
+    this.helpKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.H);
+    this.buildHelpOverlay(width, height);
     this.otherPlayers = {};
     this.player = this.add.rectangle(width / 2, height / 2, 50, 50, SELF_COLOR);
     this.pointer = this.add.triangle(width / 2, height / 2, 10, 0, 20, 20, 0, 20, 0xff0000);
@@ -107,6 +109,7 @@ class HelloWorldScene extends Phaser.Scene {
     this.actionLockEndTime = 0;
     this.dashDirection = 1;
     this.itSessionId = null;
+    this.activeEffects = [];
 
     if (this.room) {
       this.setupRoom(this.room);
@@ -119,21 +122,74 @@ class HelloWorldScene extends Phaser.Scene {
     if (!attack) return;
     this.nextAttackTime = time + attack.cooldownMs;
     this.room.send('attack', { attackId, direction: this.facing });
-    this.showAttackEffect(attackId, this.player.x, this.player.y, this.facing);
+    this.showAttackEffect(attackId, this.player, this.facing);
   }
 
-  showAttackEffect(attackId, x, y, direction) {
+  // `target` is a live game object (this.player, or a remote player's rect) -
+  // the swing box re-reads its x/y every frame in update() so it keeps
+  // following the attacker instead of staying pinned to where they were
+  // standing when the attack fired.
+  showAttackEffect(attackId, target, direction) {
     const attack = this.attacks[attackId];
     if (!attack) return;
     const fx = attack.effect;
     const offset = direction === 'left' ? -fx.offsetFromPlayer : fx.offsetFromPlayer;
-    const swing = this.add.rectangle(x + offset, y, fx.width, fx.height, Number(fx.color), fx.alpha);
+    const swing = this.add.rectangle(target.x + offset, target.y, fx.width, fx.height, Number(fx.color), fx.alpha);
+    this.activeEffects.push({ swing, target, offset });
     this.tweens.add({
       targets: swing,
       alpha: 0,
       duration: fx.durationMs,
-      onComplete: () => swing.destroy(),
+      onComplete: () => {
+        this.activeEffects = this.activeEffects.filter((e) => e.swing !== swing);
+        swing.destroy();
+      },
     });
+  }
+
+  roomTip() {
+    switch (this.roomKind) {
+      case 'arena': return 'Reduce another player\'s HP to zero to respawn them. Attacking costs energy, which regenerates over time.';
+      case 'tag': return 'The yellow player is "it" - touch another player to pass it on to them. Just-tagged players are briefly immune.';
+      default: return 'A shared hub with no combat. Walk into the glowing door to head to the Arena browser.';
+    }
+  }
+
+  buildHelpOverlay(width, height) {
+    this.helpVisible = false;
+    this.helpHint = this.add.text(width - 10, 10, 'H - Help', { fontSize: '12px', color: '#aaaaaa' })
+      .setOrigin(1, 0)
+      .setDepth(100);
+
+    const lines = [
+      'CONTROLS',
+      'Move:         WASD or Arrow Keys',
+      'Attack:       E  or  /',
+      'Super Attack: R  or  .',
+      'Dash:         Space, Q, or Shift (deals damage in Arenas)',
+      '',
+      this.roomTip(),
+      '',
+      'Press H to close',
+    ];
+
+    const panelWidth = 460;
+    const panelHeight = 240;
+    this.helpPanel = this.add.container(width / 2, height / 2).setDepth(101).setVisible(false);
+    const bg = this.add.rectangle(0, 0, panelWidth, panelHeight, 0x000000, 0.8).setStrokeStyle(2, 0xffffff, 0.5);
+    const text = this.add.text(0, 0, lines.join('\n'), {
+      fontSize: '15px',
+      color: '#ffffff',
+      align: 'left',
+      lineSpacing: 6,
+      wordWrap: { width: panelWidth - 40 },
+    }).setOrigin(0.5);
+    this.helpPanel.add([bg, text]);
+  }
+
+  toggleHelp() {
+    this.helpVisible = !this.helpVisible;
+    this.helpPanel.setVisible(this.helpVisible);
   }
 
   showDashEffect(x, y) {
@@ -265,7 +321,7 @@ class HelloWorldScene extends Phaser.Scene {
     this.room.onMessage('playerAttacked', ({ sessionId, attackId, direction }) => {
       if (sessionId === this.room.sessionId) return;
       const other = this.otherPlayers[sessionId];
-      if (other) this.showAttackEffect(attackId, other.rect.x, other.rect.y, direction);
+      if (other) this.showAttackEffect(attackId, other.rect, direction);
     });
 
     this.room.onMessage('playerHit', ({ sessionId, hp }) => {
@@ -301,6 +357,15 @@ class HelloWorldScene extends Phaser.Scene {
   }
 
   update(time) {
+    if (Phaser.Input.Keyboard.JustDown(this.helpKey)) {
+      this.toggleHelp();
+    }
+
+    for (const { swing, target, offset } of this.activeEffects) {
+      swing.x = target.x + offset;
+      swing.y = target.y;
+    }
+
     let moved = false;
     const dashing = time < this.dashEndTime;
     const locked = time < this.actionLockEndTime;
@@ -352,6 +417,15 @@ class HelloWorldScene extends Phaser.Scene {
       this.dashEndTime = time + DASH_DURATION_MS;
       this.actionLockEndTime = this.dashEndTime + DASH_END_LAG_MS;
       this.showDashEffect(this.player.x, this.player.y);
+      // Dashing through an opponent only deals damage in arenas - ArenaRoom is the
+      // only room that registers an "attack" handler, so this is a no-op elsewhere.
+      if (this.room && this.roomKind === 'arena') {
+        this.room.send('attack', { attackId: 'dash', direction: this.facing });
+        // The trail above is centered on the player; also show the actual
+        // front-offset hitbox from dash.json, same as tryAttack() does for
+        // the other attacks, so the dasher can see the region that can hit.
+        this.showAttackEffect('dash', this.player, this.facing);
+      }
     }
 
     if (!this.doorTriggered && this.onDoor && Phaser.Geom.Intersects.RectangleToRectangle(this.player.getBounds(), this.door.getBounds())) {
@@ -511,7 +585,16 @@ export default function PhaserGame() {
   if (!room) {
     return (
       <div style={{ color: '#fff', fontFamily: 'sans-serif', padding: 20, maxWidth: 480 }}>
-        <h2>Main Lobby</h2>
+        <div style={{ background: '#22222e', border: '1px solid #444', borderRadius: 8, padding: 16 }}>
+          <h2 style={{ marginTop: 0 }}>How to Play</h2>
+          <p style={{ opacity: 0.85, fontSize: 14, margin: '4px 0' }}><strong>Move:</strong> WASD or Arrow Keys</p>
+          <p style={{ opacity: 0.85, fontSize: 14, margin: '4px 0' }}><strong>Attack:</strong> E or /  &nbsp; <strong>Super Attack:</strong> R or .</p>
+          <p style={{ opacity: 0.85, fontSize: 14, margin: '4px 0' }}><strong>Dash:</strong> Space, Q, or Shift &nbsp; (deals damage if it hits someone in an Arena)</p>
+          <p style={{ opacity: 0.85, fontSize: 14, margin: '4px 0' }}>Walk into the glowing door in a room to move between the main lobby and the arena browser.</p>
+          <p style={{ opacity: 0.7, fontSize: 13, margin: '8px 0 0' }}>Once you're in a game, press <strong>H</strong> anytime for an in-game reminder of the controls.</p>
+        </div>
+
+        <h2 style={{ marginTop: 24 }}>Main Lobby</h2>
         <p style={{ opacity: 0.7, fontSize: 14 }}>One shared room. Attacking is disabled here.</p>
         <button className = {styles.menu} disabled={busy || !attacks} onClick={joinMainLobby}>{busy ? 'Connecting…' : 'Join Main Lobby'}</button>
 
