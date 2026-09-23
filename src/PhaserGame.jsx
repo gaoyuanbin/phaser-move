@@ -6,9 +6,22 @@ const COLYSEUS_URL = import.meta.env.VITE_COLYSEUS_URL || 'ws://localhost:2567';
 const ARENAS_URL = import.meta.env.VITE_ARENAS_URL || COLYSEUS_URL.replace(/^ws/, 'http') + '/arenas';
 const ATTACKS_URL = import.meta.env.VITE_ATTACKS_URL || COLYSEUS_URL.replace(/^ws/, 'http') + '/attacks';
 
-const SELF_COLOR = 0x00ffff;
 const OTHER_COLOR = 0xff4444;
 const IT_COLOR = 0xffff00;
+
+// 3 default characters, cosmetic only (fill color) - picked in the menu,
+// sent to the server as a plain id, and looked up back to a color here.
+// A self player is also given a white outline (see create()) so you can
+// always tell yourself apart even if someone else picked the same one.
+const CHARACTERS = [
+  { id: 'crimson', name: 'Crimson', color: 0xff4444 },
+  { id: 'azure', name: 'Azure', color: 0x4488ff },
+  { id: 'jade', name: 'Jade', color: 0x44dd88 },
+];
+
+function characterColor(characterId) {
+  return CHARACTERS.find((c) => c.id === characterId)?.color ?? OTHER_COLOR;
+}
 
 const DASH_SPEED = 12;
 const DASH_DURATION_MS = 150;
@@ -42,6 +55,7 @@ class HelloWorldScene extends Phaser.Scene {
     // fetched once before this scene is created - nothing attack-specific
     // is hardcoded in the client.
     this.attacks = data.attacks || {};
+    this.myCharacter = data.character;
   }
 
   preload() {
@@ -94,7 +108,8 @@ class HelloWorldScene extends Phaser.Scene {
     this.helpKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.H);
     this.buildHelpOverlay(width, height);
     this.otherPlayers = {};
-    this.player = this.add.rectangle(width / 2, height / 2, 50, 50, SELF_COLOR);
+    this.player = this.add.rectangle(width / 2, height / 2, 50, 50, characterColor(this.myCharacter));
+    this.player.setStrokeStyle(3, 0xffffff, 0.9);
     this.pointer = this.add.triangle(width / 2, height / 2, 10, 0, 20, 20, 0, 20, 0xff0000);
 
     this.statusText = this.add.text(10, 10, 'Connecting...', { fontSize: '14px', color: '#ffff00' });
@@ -235,7 +250,8 @@ class HelloWorldScene extends Phaser.Scene {
 
   colorForPlayer(sessionId) {
     if (sessionId === this.itSessionId) return IT_COLOR;
-    return sessionId === this.room?.sessionId ? SELF_COLOR : OTHER_COLOR;
+    if (sessionId === this.room?.sessionId) return characterColor(this.myCharacter);
+    return characterColor(this.otherPlayers[sessionId]?.character);
   }
 
   updateItColors() {
@@ -245,13 +261,24 @@ class HelloWorldScene extends Phaser.Scene {
     }
   }
 
-  createOtherPlayer(sessionId, x, y) {
+  createOtherPlayer(sessionId, x, y, character) {
+    const other = { character };
+    this.otherPlayers[sessionId] = other;
     const rect = this.add.rectangle(x, y, 50, 50, this.colorForPlayer(sessionId));
     const hpBg = this.add.rectangle(x, y + HP_BAR_OFFSET_Y, HP_BAR_WIDTH, HP_BAR_HEIGHT, 0x222222);
     const hpFill = this.add.rectangle(x, y + HP_BAR_OFFSET_Y, HP_BAR_WIDTH, HP_BAR_HEIGHT, 0x22ff22);
-    const other = { rect, hpBg, hpFill };
-    this.otherPlayers[sessionId] = other;
+    Object.assign(other, { rect, hpBg, hpFill });
     return other;
+  }
+
+  // playerMoved's fallback creates an other-player before we know its character
+  // (undefined, so it renders in OTHER_COLOR). This lets a later 'playerJoined'/
+  // 'playerSaidHi' - which do carry the character - fill that in retroactively.
+  setOtherPlayerCharacter(sessionId, character) {
+    const other = this.otherPlayers[sessionId];
+    if (!other || other.character === character) return;
+    other.character = character;
+    other.rect.fillColor = this.colorForPlayer(sessionId);
   }
 
   positionOtherPlayer(other, x, y) {
@@ -274,21 +301,24 @@ class HelloWorldScene extends Phaser.Scene {
     this.room.onMessage("imroom", (data) => {
       this.roomKind = data.roomtype;
     })
-    this.room.onMessage('playerJoined', ({ sessionId }) => {
+    this.room.onMessage('playerJoined', ({ sessionId, character }) => {
       if (sessionId === this.room.sessionId) return;
       if (!this.otherPlayers[sessionId]) {
-        this.createOtherPlayer(sessionId, this.scale.width / 2, this.scale.height / 2);
+        this.createOtherPlayer(sessionId, this.scale.width / 2, this.scale.height / 2, character);
         this.room.send('sayHi', { x: this.player.x, y: this.player.y });
+      } else {
+        this.setOtherPlayerCharacter(sessionId, character);
       }
       console.log('players:', [this.room.sessionId, ...Object.keys(this.otherPlayers)]);
     });
 
-    this.room.onMessage('playerSaidHi', ({ sessionId, x, y }) => {
+    this.room.onMessage('playerSaidHi', ({ sessionId, x, y, character }) => {
       if (sessionId === this.room.sessionId) return;
       if (!this.otherPlayers[sessionId]) {
-        this.createOtherPlayer(sessionId, x, y);
+        this.createOtherPlayer(sessionId, x, y, character);
       } else {
         this.positionOtherPlayer(this.otherPlayers[sessionId], x, y);
+        this.setOtherPlayerCharacter(sessionId, character);
       }
     });
 
@@ -442,6 +472,7 @@ export default function PhaserGame() {
 
   const [room, setRoom] = useState(null);
   const [roomKind, setRoomKind] = useState(null); // 'main' | 'arena'
+  const [character, setCharacter] = useState(CHARACTERS[0].id);
   const [arenas, setArenas] = useState([]);
   const [attacks, setAttacks] = useState(null);
   const [error, setError] = useState('');
@@ -491,7 +522,7 @@ export default function PhaserGame() {
   const joinMainLobby = async () => {
     setBusy(true); setError('');
     try {
-      setRoom(await client.joinOrCreate('hello_room'));
+      setRoom(await client.joinOrCreate('hello_room', { character }));
       setRoomKind('main');
     } catch (e) {
       console.error('Failed to join main lobby:', e);
@@ -504,7 +535,7 @@ export default function PhaserGame() {
   const createArena = async () => {
     setBusy(true); setError('');
     try {
-      setRoom(await client.create('arena_room'));
+      setRoom(await client.create('arena_room', { character }));
       setRoomKind('arena');
     } catch (e) {
       console.error('Failed to create arena:', e);
@@ -517,7 +548,7 @@ export default function PhaserGame() {
   const joinTagGame = async () => {
     setBusy(true); setError('');
     try {
-      setRoom(await client.joinOrCreate('tag_room'));
+      setRoom(await client.joinOrCreate('tag_room', { character }));
       setRoomKind('tag');
     } catch (e) {
       console.error('Failed to join tag game:', e);
@@ -530,7 +561,7 @@ export default function PhaserGame() {
   const joinArena = async (roomId) => {
     setBusy(true); setError('');
     try {
-      setRoom(await client.joinById(roomId));
+      setRoom(await client.joinById(roomId, { character }));
       setRoomKind('arena');
     } catch (e) {
       console.error('Failed to join arena:', e);
@@ -549,13 +580,13 @@ export default function PhaserGame() {
       return;
     }
     try {
-      const newRoom = await client.joinOrCreate('hello_room');
+      const newRoom = await client.joinOrCreate('hello_room', { character });
       setRoomKind('main');
       setRoom(newRoom);
     } catch (e) {
       console.error('Failed to return to main lobby:', e);
     }
-  }, [roomKind, client]);
+  }, [roomKind, client, character]);
 
   // Mount the Phaser game once a room has been picked/created and attack data has loaded.
   useEffect(() => {
@@ -568,7 +599,7 @@ export default function PhaserGame() {
       backgroundColor: '#1a1a2e',
       parent: containerRef.current,
     });
-    gameRef.current.scene.add('HelloWorldScene', HelloWorldScene, true, { room, roomKind, onDoor: handleDoor, attacks });
+    gameRef.current.scene.add('HelloWorldScene', HelloWorldScene, true, { room, roomKind, onDoor: handleDoor, attacks, character });
 
     setTimeout(() => {
       const canvas = containerRef.current?.querySelector('canvas');
@@ -580,7 +611,7 @@ export default function PhaserGame() {
       gameRef.current?.destroy(true);
       gameRef.current = null;
     };
-  }, [room, roomKind, attacks, handleDoor]);
+  }, [room, roomKind, attacks, handleDoor, character]);
 
   if (!room) {
     return (
@@ -592,6 +623,29 @@ export default function PhaserGame() {
           <p style={{ opacity: 0.85, fontSize: 14, margin: '4px 0' }}><strong>Dash:</strong> Space, Q, or Shift &nbsp; (deals damage if it hits someone in an Arena)</p>
           <p style={{ opacity: 0.85, fontSize: 14, margin: '4px 0' }}>Walk into the glowing door in a room to move between the main lobby and the arena browser.</p>
           <p style={{ opacity: 0.7, fontSize: 13, margin: '8px 0 0' }}>Once you're in a game, press <strong>H</strong> anytime for an in-game reminder of the controls.</p>
+        </div>
+
+        <h2 style={{ marginTop: 24 }}>Character</h2>
+        <div style={{ display: 'flex', gap: 10 }}>
+          {CHARACTERS.map((c) => (
+            <button
+              key={c.id}
+              onClick={() => setCharacter(c.id)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                padding: '6px 10px', borderRadius: 6, cursor: 'pointer',
+                background: character === c.id ? '#3a3a4e' : '#22222e',
+                border: character === c.id ? '2px solid #fff' : '2px solid #444',
+                color: '#fff',
+              }}
+            >
+              <span style={{
+                width: 14, height: 14, borderRadius: '50%', display: 'inline-block',
+                background: `#${c.color.toString(16).padStart(6, '0')}`,
+              }} />
+              {c.name}
+            </button>
+          ))}
         </div>
 
         <h2 style={{ marginTop: 24 }}>Main Lobby</h2>
