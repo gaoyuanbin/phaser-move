@@ -4,24 +4,13 @@ import * as Colyseus from 'colyseus.js';
 import styles from './buttons.module.css';
 const COLYSEUS_URL = import.meta.env.VITE_COLYSEUS_URL || 'ws://localhost:2567';
 const ARENAS_URL = import.meta.env.VITE_ARENAS_URL || COLYSEUS_URL.replace(/^ws/, 'http') + '/arenas';
-const ATTACKS_URL = import.meta.env.VITE_ATTACKS_URL || COLYSEUS_URL.replace(/^ws/, 'http') + '/attacks';
+const CHARACTERS_URL = import.meta.env.VITE_CHARACTERS_URL || COLYSEUS_URL.replace(/^ws/, 'http') + '/characters';
 
 const OTHER_COLOR = 0xff4444;
 const IT_COLOR = 0xffff00;
-
-// 3 default characters, cosmetic only (fill color) - picked in the menu,
-// sent to the server as a plain id, and looked up back to a color here.
-// A self player is also given a white outline (see create()) so you can
-// always tell yourself apart even if someone else picked the same one.
-const CHARACTERS = [
-  { id: 'crimson', name: 'Crimson', color: 0xff4444 },
-  { id: 'azure', name: 'Azure', color: 0x4488ff },
-  { id: 'jade', name: 'Jade', color: 0x44dd88 },
-];
-
-function characterColor(characterId) {
-  return CHARACTERS.find((c) => c.id === characterId)?.color ?? OTHER_COLOR;
-}
+const DEFAULT_MOVE_SPEED = 3;
+const DEFAULT_MAX_HP = 100;
+const DEFAULT_MAX_ENERGY = 100;
 
 const DASH_SPEED = 12;
 const DASH_DURATION_MS = 150;
@@ -34,7 +23,6 @@ const HP_BAR_OFFSET_Y = 35;
 const ENERGY_BAR_WIDTH = 50;
 const ENERGY_BAR_HEIGHT = 4;
 const ENERGY_BAR_OFFSET_Y = HP_BAR_OFFSET_Y + HP_BAR_HEIGHT + 4;
-const MAX_ENERGY = 100;
 
 const POINTER_OFFSET = 50;
 
@@ -51,11 +39,13 @@ class HelloWorldScene extends Phaser.Scene {
     this.room = data.room;
     this.roomKind = data.roomKind;
     this.onDoor = data.onDoor;
-    // Attack stats/visuals come from the server's data/attacks/*.json,
-    // fetched once before this scene is created - nothing attack-specific
-    // is hardcoded in the client.
-    this.attacks = data.attacks || {};
+    // Character stats/visuals (speed, hp/energy caps, and each one's own
+    // attack/superAttack/dash movesets) come from the server's
+    // data/characters/*.json, fetched once before this scene is created -
+    // nothing character- or attack-specific is hardcoded in the client.
+    this.characters = data.characters || {};
     this.myCharacter = data.character;
+    this.attacks = this.characters[this.myCharacter]?.attacks || {};
   }
 
   preload() {
@@ -108,7 +98,7 @@ class HelloWorldScene extends Phaser.Scene {
     this.helpKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.H);
     this.buildHelpOverlay(width, height);
     this.otherPlayers = {};
-    this.player = this.add.rectangle(width / 2, height / 2, 50, 50, characterColor(this.myCharacter));
+    this.player = this.add.rectangle(width / 2, height / 2, 50, 50, this.characterColor(this.myCharacter));
     this.player.setStrokeStyle(3, 0xffffff, 0.9);
     this.pointer = this.add.triangle(width / 2, height / 2, 10, 0, 20, 20, 0, 20, 0xff0000);
 
@@ -118,7 +108,10 @@ class HelloWorldScene extends Phaser.Scene {
     this.pointer.rotation = this.facingAngle();
     this.pointer.x = this.player.x + this.facingVector().x * POINTER_OFFSET;
     this.pointer.y = this.player.y + this.facingVector().y * POINTER_OFFSET;
-    this.maxHp = 100;
+    const myCharacterData = this.characters[this.myCharacter];
+    this.maxHp = myCharacterData?.maxHp ?? DEFAULT_MAX_HP;
+    this.maxEnergy = myCharacterData?.maxEnergy ?? DEFAULT_MAX_ENERGY;
+    this.moveSpeed = myCharacterData?.speed ?? DEFAULT_MOVE_SPEED;
     this.nextAttackTime = 0;
     this.dashEndTime = 0;
     this.actionLockEndTime = 0;
@@ -143,9 +136,11 @@ class HelloWorldScene extends Phaser.Scene {
   // `target` is a live game object (this.player, or a remote player's rect) -
   // the swing box re-reads its x/y every frame in update() so it keeps
   // following the attacker instead of staying pinned to where they were
-  // standing when the attack fired.
-  showAttackEffect(attackId, target, direction) {
-    const attack = this.attacks[attackId];
+  // standing when the attack fired. `attacksSource` defaults to our own
+  // moveset, but callers showing another player's attack pass that
+  // player's own character's attacks, since movesets differ per character.
+  showAttackEffect(attackId, target, direction, attacksSource = this.attacks) {
+    const attack = attacksSource[attackId];
     if (!attack) return;
     const fx = attack.effect;
     const offset = direction === 'left' ? -fx.offsetFromPlayer : fx.offsetFromPlayer;
@@ -245,13 +240,18 @@ class HelloWorldScene extends Phaser.Scene {
   }
 
   setEnergyBar(energy) {
-    this.curenergy.setDisplaySize(ENERGY_BAR_WIDTH * (energy / MAX_ENERGY), ENERGY_BAR_HEIGHT);
+    this.curenergy.setDisplaySize(ENERGY_BAR_WIDTH * (energy / this.maxEnergy), ENERGY_BAR_HEIGHT);
+  }
+
+  characterColor(characterId) {
+    const color = this.characters[characterId]?.color;
+    return color !== undefined ? Number(color) : OTHER_COLOR;
   }
 
   colorForPlayer(sessionId) {
     if (sessionId === this.itSessionId) return IT_COLOR;
-    if (sessionId === this.room?.sessionId) return characterColor(this.myCharacter);
-    return characterColor(this.otherPlayers[sessionId]?.character);
+    if (sessionId === this.room?.sessionId) return this.characterColor(this.myCharacter);
+    return this.characterColor(this.otherPlayers[sessionId]?.character);
   }
 
   updateItColors() {
@@ -291,7 +291,8 @@ class HelloWorldScene extends Phaser.Scene {
   }
 
   setOtherPlayerHp(other, hp) {
-    other.hpFill.setDisplaySize(HP_BAR_WIDTH * (hp / this.maxHp), HP_BAR_HEIGHT);
+    const maxHp = this.characters[other.character]?.maxHp ?? DEFAULT_MAX_HP;
+    other.hpFill.setDisplaySize(HP_BAR_WIDTH * (hp / maxHp), HP_BAR_HEIGHT);
     other.hpFill.x = other.rect.x - (HP_BAR_WIDTH - other.hpFill.displayWidth) / 2;
   }
 
@@ -351,7 +352,10 @@ class HelloWorldScene extends Phaser.Scene {
     this.room.onMessage('playerAttacked', ({ sessionId, attackId, direction }) => {
       if (sessionId === this.room.sessionId) return;
       const other = this.otherPlayers[sessionId];
-      if (other) this.showAttackEffect(attackId, other.rect, direction);
+      if (other) {
+        const theirAttacks = this.characters[other.character]?.attacks || {};
+        this.showAttackEffect(attackId, other.rect, direction, theirAttacks);
+      }
     });
 
     this.room.onMessage('playerHit', ({ sessionId, hp }) => {
@@ -404,10 +408,10 @@ class HelloWorldScene extends Phaser.Scene {
       this.player.x += DASH_SPEED * this.dashDirection;
       moved = true;
     } else if (!locked) {
-      if (this.cursors.left.isDown || this.wasd.left.isDown) { this.player.x -= 3; moved = true; this.facing = 'left'; }
-      if (this.cursors.right.isDown || this.wasd.right.isDown) { this.player.x += 3; moved = true; this.facing = 'right'; }
-      if (this.cursors.up.isDown || this.wasd.up.isDown) { this.player.y -= 3; moved = true; this.facing = "up"}
-      if (this.cursors.down.isDown || this.wasd.down.isDown) { this.player.y += 3; moved = true; this.facing = "down"}
+      if (this.cursors.left.isDown || this.wasd.left.isDown) { this.player.x -= this.moveSpeed; moved = true; this.facing = 'left'; }
+      if (this.cursors.right.isDown || this.wasd.right.isDown) { this.player.x += this.moveSpeed; moved = true; this.facing = 'right'; }
+      if (this.cursors.up.isDown || this.wasd.up.isDown) { this.player.y -= this.moveSpeed; moved = true; this.facing = "up"}
+      if (this.cursors.down.isDown || this.wasd.down.isDown) { this.player.y += this.moveSpeed; moved = true; this.facing = "down"}
     }
     const hw = this.player.width / 2;
     const hh = this.player.height / 2;
@@ -472,20 +476,26 @@ export default function PhaserGame() {
 
   const [room, setRoom] = useState(null);
   const [roomKind, setRoomKind] = useState(null); // 'main' | 'arena'
-  const [character, setCharacter] = useState(CHARACTERS[0].id);
+  const [character, setCharacter] = useState(null);
   const [arenas, setArenas] = useState([]);
-  const [attacks, setAttacks] = useState(null);
+  const [characters, setCharacters] = useState(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
-  // Attack stats/visuals are data-driven (colyseus-server/data/attacks/*.json),
-  // fetched once on load rather than hardcoded in this component.
+  // Character stats/visuals (speed, hp/energy caps, attacks) are data-driven
+  // (colyseus-server/data/characters/*.json), fetched once on load rather
+  // than hardcoded in this component. Defaults the selection to whichever
+  // character comes back first.
   useEffect(() => {
     let ignore = false;
-    fetch(ATTACKS_URL)
+    fetch(CHARACTERS_URL)
       .then((res) => res.json())
-      .then((data) => { if (!ignore) setAttacks(data); })
-      .catch((e) => console.error('Failed to load attack data:', e));
+      .then((data) => {
+        if (ignore) return;
+        setCharacters(data);
+        setCharacter((current) => current ?? Object.keys(data)[0]);
+      })
+      .catch((e) => console.error('Failed to load character data:', e));
     return () => { ignore = true; };
   }, []);
 
@@ -588,9 +598,9 @@ export default function PhaserGame() {
     }
   }, [roomKind, client, character]);
 
-  // Mount the Phaser game once a room has been picked/created and attack data has loaded.
+  // Mount the Phaser game once a room has been picked/created and character data has loaded.
   useEffect(() => {
-    if (!room || !attacks) return;
+    if (!room || !characters) return;
 
     gameRef.current = new Phaser.Game({
       type: Phaser.AUTO,
@@ -599,7 +609,7 @@ export default function PhaserGame() {
       backgroundColor: '#1a1a2e',
       parent: containerRef.current,
     });
-    gameRef.current.scene.add('HelloWorldScene', HelloWorldScene, true, { room, roomKind, onDoor: handleDoor, attacks, character });
+    gameRef.current.scene.add('HelloWorldScene', HelloWorldScene, true, { room, roomKind, onDoor: handleDoor, characters, character });
 
     setTimeout(() => {
       const canvas = containerRef.current?.querySelector('canvas');
@@ -611,7 +621,7 @@ export default function PhaserGame() {
       gameRef.current?.destroy(true);
       gameRef.current = null;
     };
-  }, [room, roomKind, attacks, handleDoor, character]);
+  }, [room, roomKind, characters, handleDoor, character]);
 
   if (!room) {
     return (
@@ -627,7 +637,7 @@ export default function PhaserGame() {
 
         <h2 style={{ marginTop: 24 }}>Character</h2>
         <div style={{ display: 'flex', gap: 10 }}>
-          {CHARACTERS.map((c) => (
+          {characters && Object.values(characters).map((c) => (
             <button
               key={c.id}
               onClick={() => setCharacter(c.id)}
@@ -641,7 +651,7 @@ export default function PhaserGame() {
             >
               <span style={{
                 width: 14, height: 14, borderRadius: '50%', display: 'inline-block',
-                background: `#${c.color.toString(16).padStart(6, '0')}`,
+                background: `#${Number(c.color).toString(16).padStart(6, '0')}`,
               }} />
               {c.name}
             </button>
@@ -650,16 +660,16 @@ export default function PhaserGame() {
 
         <h2 style={{ marginTop: 24 }}>Main Lobby</h2>
         <p style={{ opacity: 0.7, fontSize: 14 }}>One shared room. Attacking is disabled here.</p>
-        <button className = {styles.menu} disabled={busy || !attacks} onClick={joinMainLobby}>{busy ? 'Connecting…' : 'Join Main Lobby'}</button>
+        <button className = {styles.menu} disabled={busy || !characters} onClick={joinMainLobby}>{busy ? 'Connecting…' : 'Join Main Lobby'}</button>
 
         <h2 style={{ marginTop: 32 }}>Tag</h2>
         <p style={{ opacity: 0.7, fontSize: 14 }}>One shared room. Whoever's "it" (yellow) tags the next by touch.</p>
-        <button className={styles.menu} disabled={busy || !attacks} onClick={joinTagGame}>{busy ? 'Connecting…' : 'Join Tag Game'}</button>
+        <button className={styles.menu} disabled={busy || !characters} onClick={joinTagGame}>{busy ? 'Connecting…' : 'Join Tag Game'}</button>
 
         <h2 style={{ marginTop: 32 }}>Arenas</h2>
         <p style={{ opacity: 0.7, fontSize: 14 }}>Small rooms, up to 8 players, attacking enabled. Anyone can create one.</p>
-        <button className={styles.menu} disabled={busy || !attacks} onClick={createArena}>{busy ? 'Connecting…' : 'Create New Arena'}</button>
-        <button className={styles.menu} disabled={busy || !attacks} onClick={refreshArenas} style={{ marginLeft: 8 }}>Refresh</button>
+        <button className={styles.menu} disabled={busy || !characters} onClick={createArena}>{busy ? 'Connecting…' : 'Create New Arena'}</button>
+        <button className={styles.menu} disabled={busy || !characters} onClick={refreshArenas} style={{ marginLeft: 8 }}>Refresh</button>
         {busy && <p style={{ opacity: 0.7, fontSize: 13, marginTop: 8 }}>Connecting to server… this can take up to 30s if it's been idle.</p>}
 
         <ul style={{ paddingLeft: 20 }}>
@@ -679,7 +689,7 @@ export default function PhaserGame() {
           {arenas.length === 0 && <li>No open arenas — create one!</li>}
         </ul>
 
-        {!attacks && <p style={{ opacity: 0.7, fontSize: 13, marginTop: 8 }}>Loading attack data…</p>}
+        {!characters && <p style={{ opacity: 0.7, fontSize: 13, marginTop: 8 }}>Loading character data…</p>}
         {error && <p style={{ color: 'salmon' }}>{error}</p>}
       </div>
     );
