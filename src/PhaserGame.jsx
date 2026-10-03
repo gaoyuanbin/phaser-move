@@ -24,6 +24,17 @@ const ENERGY_BAR_WIDTH = 50;
 const ENERGY_BAR_HEIGHT = 4;
 const ENERGY_BAR_OFFSET_Y = HP_BAR_OFFSET_Y + HP_BAR_HEIGHT + 4;
 
+// Ported from PygameFighting's STATUS_COLORS - small dots drawn above a player
+// for each active status effect (colyseus-server's "playerStatusEffects"
+// messages). "stun" and "slow" also gate/scale this player's own WASD
+// movement in update() below; SLOW_MULTIPLIER mirrors the one attack that
+// currently applies "slow" (azure.json's superAttack).
+const STATUS_COLORS = { stun: 0xffcc00, slow: 0x33aaff, poison: 0x66ff33, regen: 0x33ffaa };
+const SLOW_MULTIPLIER = 0.4;
+const STATUS_DOT_RADIUS = 4;
+const STATUS_DOT_SPACING = 12;
+const STATUS_DOT_OFFSET_Y = -40;
+
 const POINTER_OFFSET = 50;
 
 // Ported from PygameFighting's data/game_settings.json ("music_volume": 0.4)
@@ -118,6 +129,9 @@ class HelloWorldScene extends Phaser.Scene {
     this.dashDirection = 1;
     this.itSessionId = null;
     this.activeEffects = [];
+    this.myStatusEffects = [];
+    this.statusKey = '';
+    this.statusDots = [];
 
     if (this.room) {
       this.setupRoom(this.room);
@@ -262,13 +276,30 @@ class HelloWorldScene extends Phaser.Scene {
   }
 
   createOtherPlayer(sessionId, x, y, character) {
-    const other = { character };
+    const other = { character, statusEffects: [], statusKey: '', statusDots: [] };
     this.otherPlayers[sessionId] = other;
     const rect = this.add.rectangle(x, y, 50, 50, this.colorForPlayer(sessionId));
     const hpBg = this.add.rectangle(x, y + HP_BAR_OFFSET_Y, HP_BAR_WIDTH, HP_BAR_HEIGHT, 0x222222);
     const hpFill = this.add.rectangle(x, y + HP_BAR_OFFSET_Y, HP_BAR_WIDTH, HP_BAR_HEIGHT, 0x22ff22);
     Object.assign(other, { rect, hpBg, hpFill });
     return other;
+  }
+
+  // Shared by both the local player and other players: `target` just needs
+  // `.statusDots` (array of circles) and `.statusKey` (last-rendered effect
+  // list, so unrelated updates like a position tick don't recreate them).
+  setStatusDots(target, x, y, effects) {
+    const key = effects.join(',');
+    if (target.statusKey !== key) {
+      for (const dot of target.statusDots) dot.destroy();
+      target.statusDots = effects.map(() => this.add.circle(x, y + STATUS_DOT_OFFSET_Y, STATUS_DOT_RADIUS, 0xffffff));
+      target.statusKey = key;
+    }
+    target.statusDots.forEach((dot, i) => {
+      dot.fillColor = STATUS_COLORS[effects[i]] ?? 0xffffff;
+      dot.x = x - ((effects.length - 1) * STATUS_DOT_SPACING) / 2 + i * STATUS_DOT_SPACING;
+      dot.y = y + STATUS_DOT_OFFSET_Y;
+    });
   }
 
   // playerMoved's fallback creates an other-player before we know its character
@@ -288,6 +319,7 @@ class HelloWorldScene extends Phaser.Scene {
     other.hpBg.y = y + HP_BAR_OFFSET_Y;
     other.hpFill.y = y + HP_BAR_OFFSET_Y;
     other.hpFill.x = x - (HP_BAR_WIDTH - other.hpFill.displayWidth) / 2;
+    this.setStatusDots(other, x, y, other.statusEffects || []);
   }
 
   setOtherPlayerHp(other, hp) {
@@ -335,7 +367,21 @@ class HelloWorldScene extends Phaser.Scene {
         other.rect.destroy();
         other.hpBg.destroy();
         other.hpFill.destroy();
+        for (const dot of other.statusDots) dot.destroy();
         delete this.otherPlayers[sessionId];
+      }
+    });
+
+    // "stun"/"slow" are enforced locally for our own player in update() below
+    // (the server doesn't validate movement at all, so there's nothing to
+    // trust beyond what it tells us); "poison"/"regen" just tick hp server-side.
+    // Either way, this only drives the status dots - combat state (hp) still
+    // arrives via the existing 'playerHit'/'playerRespawned' messages.
+    this.room.onMessage('playerStatusEffects', ({ sessionId, effects }) => {
+      if (sessionId === this.room.sessionId) {
+        this.myStatusEffects = effects;
+      } else if (this.otherPlayers[sessionId]) {
+        this.otherPlayers[sessionId].statusEffects = effects;
       }
     });
 
@@ -403,16 +449,23 @@ class HelloWorldScene extends Phaser.Scene {
     let moved = false;
     const dashing = time < this.dashEndTime;
     const locked = time < this.actionLockEndTime;
+    // Ported from PygameFighting's Player.move(): "stun" blocks regular
+    // movement outright, "slow" just scales its speed. Dashing isn't gated -
+    // dashing through a stun/slow is this game's own addition, with no
+    // equivalent in the original.
+    const stunned = this.myStatusEffects.includes('stun');
+    const speed = this.myStatusEffects.includes('slow') ? this.moveSpeed * SLOW_MULTIPLIER : this.moveSpeed;
 
     if (dashing) {
       this.player.x += DASH_SPEED * this.dashDirection;
       moved = true;
-    } else if (!locked) {
-      if (this.cursors.left.isDown || this.wasd.left.isDown) { this.player.x -= this.moveSpeed; moved = true; this.facing = 'left'; }
-      if (this.cursors.right.isDown || this.wasd.right.isDown) { this.player.x += this.moveSpeed; moved = true; this.facing = 'right'; }
-      if (this.cursors.up.isDown || this.wasd.up.isDown) { this.player.y -= this.moveSpeed; moved = true; this.facing = "up"}
-      if (this.cursors.down.isDown || this.wasd.down.isDown) { this.player.y += this.moveSpeed; moved = true; this.facing = "down"}
+    } else if (!locked && !stunned) {
+      if (this.cursors.left.isDown || this.wasd.left.isDown) { this.player.x -= speed; moved = true; this.facing = 'left'; }
+      if (this.cursors.right.isDown || this.wasd.right.isDown) { this.player.x += speed; moved = true; this.facing = 'right'; }
+      if (this.cursors.up.isDown || this.wasd.up.isDown) { this.player.y -= speed; moved = true; this.facing = "up"}
+      if (this.cursors.down.isDown || this.wasd.down.isDown) { this.player.y += speed; moved = true; this.facing = "down"}
     }
+    this.setStatusDots(this, this.player.x, this.player.y, this.myStatusEffects);
     const hw = this.player.width / 2;
     const hh = this.player.height / 2;
     this.player.x = Phaser.Math.Clamp(this.player.x, hw, this.scale.width - hw);
