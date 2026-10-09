@@ -106,6 +106,10 @@ class HelloWorldScene extends Phaser.Scene {
     this.dashKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
     this.dashKeyL = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.Q);
     this.dashKeyR = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SHIFT);
+    // Matches PygameFighting's own bindings: Z for the character's unique
+    // special move, F to block.
+    this.specialKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.Z);
+    this.blockKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.F);
     this.helpKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.H);
     this.buildHelpOverlay(width, height);
     this.otherPlayers = {};
@@ -143,6 +147,18 @@ class HelloWorldScene extends Phaser.Scene {
     const attack = this.attacks[attackId];
     if (!attack) return;
     this.nextAttackTime = time + attack.cooldownMs;
+    // Blink is purely a client-side instant reposition (like dash's own
+    // movement) - the server's copy of this move has no hitbox or effects,
+    // it only gates it on cooldown/energy and relays 'playerAttacked' so
+    // other clients see the swing visual.
+    if (attack.blinkDistance) {
+      const v = this.facingVector();
+      const hw = this.player.width / 2;
+      const hh = this.player.height / 2;
+      this.player.x = Phaser.Math.Clamp(this.player.x + v.x * attack.blinkDistance, hw, this.scale.width - hw);
+      this.player.y = Phaser.Math.Clamp(this.player.y + v.y * attack.blinkDistance, hh, this.scale.height - hh);
+      this.room.send('move', { x: this.player.x, y: this.player.y });
+    }
     this.room.send('attack', { attackId, direction: this.facing });
     this.showAttackEffect(attackId, this.player, this.facing);
   }
@@ -191,6 +207,8 @@ class HelloWorldScene extends Phaser.Scene {
       'Attack:       E  or  /',
       'Super Attack: R  or  .',
       'Dash:         Space, Q, or Shift (deals damage in Arenas)',
+      'Special:      Z  (your character\'s unique move)',
+      'Block:        F  (reduces incoming damage for a moment)',
       '',
       this.roomTip(),
       '',
@@ -429,6 +447,18 @@ class HelloWorldScene extends Phaser.Scene {
       this.setEnergyBar(energy);
     });
 
+    // A knockback (e.g. fireball/psystrike) repositions a player outside the
+    // normal WASD 'move' flow, so it needs its own message rather than
+    // waiting for that player's next movement tick.
+    this.room.onMessage('playerKnockedBack', ({ sessionId, x, y }) => {
+      if (sessionId === this.room.sessionId) {
+        this.player.x = x;
+        this.player.y = y;
+      } else if (this.otherPlayers[sessionId]) {
+        this.positionOtherPlayer(this.otherPlayers[sessionId], x, y);
+      }
+    });
+
     // Announce ourselves now that our handlers are mounted, so the server can
     // reply directly with everyone already in the room (see HelloRoom's "sayHi" handler) -
     // waiting on other clients to react to our "playerJoined" broadcast is racy,
@@ -492,11 +522,17 @@ class HelloWorldScene extends Phaser.Scene {
       this.room.send('move', { x: this.player.x, y: this.player.y });
     }
     const attackPressed = Phaser.Input.Keyboard.JustDown(this.attackleft.basic) || Phaser.Input.Keyboard.JustDown(this.attackright.basic);
-    const superPressed = Phaser.Input.Keyboard.JustDown(this.attackleft.super) || Phaser.Input.Keyboard.JustDown(this.attackright.super)
-    if (attackPressed && !locked && time > this.nextAttackTime) {
-      this.tryAttack('attack', time);
-    } else if (!attackPressed && superPressed && !locked && time > this.nextAttackTime) {
-      this.tryAttack('superAttack', time);
+    const superPressed = Phaser.Input.Keyboard.JustDown(this.attackleft.super) || Phaser.Input.Keyboard.JustDown(this.attackright.super);
+    const specialPressed = Phaser.Input.Keyboard.JustDown(this.specialKey);
+    const blockPressed = Phaser.Input.Keyboard.JustDown(this.blockKey);
+    // One shared cooldown gate client-side (a spam guard, not authoritative -
+    // the server tracks each move's own cooldown independently); priority
+    // order just picks one when several are pressed the same frame.
+    if (!locked && time > this.nextAttackTime) {
+      if (superPressed) this.tryAttack('superAttack', time);
+      else if (attackPressed) this.tryAttack('attack', time);
+      else if (specialPressed) this.tryAttack('special', time);
+      else if (blockPressed) this.tryAttack('block', time);
     }
 
     if (!locked && (Phaser.Input.Keyboard.JustDown(this.dashKey)||Phaser.Input.Keyboard.JustDown(this.dashKeyL)||Phaser.Input.Keyboard.JustDown(this.dashKeyR))) {
@@ -684,29 +720,32 @@ export default function PhaserGame() {
           <p style={{ opacity: 0.85, fontSize: 14, margin: '4px 0' }}><strong>Move:</strong> WASD or Arrow Keys</p>
           <p style={{ opacity: 0.85, fontSize: 14, margin: '4px 0' }}><strong>Attack:</strong> E or /  &nbsp; <strong>Super Attack:</strong> R or .</p>
           <p style={{ opacity: 0.85, fontSize: 14, margin: '4px 0' }}><strong>Dash:</strong> Space, Q, or Shift &nbsp; (deals damage if it hits someone in an Arena)</p>
+          <p style={{ opacity: 0.85, fontSize: 14, margin: '4px 0' }}><strong>Special:</strong> Z &nbsp; <strong>Block:</strong> F</p>
           <p style={{ opacity: 0.85, fontSize: 14, margin: '4px 0' }}>Walk into the glowing door in a room to move between the main lobby and the arena browser.</p>
           <p style={{ opacity: 0.7, fontSize: 13, margin: '8px 0 0' }}>Once you're in a game, press <strong>H</strong> anytime for an in-game reminder of the controls.</p>
         </div>
 
         <h2 style={{ marginTop: 24 }}>Character</h2>
-        <div style={{ display: 'flex', gap: 10 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
           {characters && Object.values(characters).map((c) => (
             <button
               key={c.id}
               onClick={() => setCharacter(c.id)}
+              title={c.name}
               style={{
-                display: 'flex', alignItems: 'center', gap: 6,
-                padding: '6px 10px', borderRadius: 6, cursor: 'pointer',
+                display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4,
+                width: 72, padding: '8px 4px', borderRadius: 6, cursor: 'pointer',
                 background: character === c.id ? '#3a3a4e' : '#22222e',
                 border: character === c.id ? '2px solid #fff' : '2px solid #444',
                 color: '#fff',
               }}
             >
-              <span style={{
-                width: 14, height: 14, borderRadius: '50%', display: 'inline-block',
-                background: `#${Number(c.color).toString(16).padStart(6, '0')}`,
-              }} />
-              {c.name}
+              <img
+                src={`/characters/${c.id}.png`}
+                alt={c.name}
+                style={{ width: 40, height: 40, objectFit: 'contain', imageRendering: 'pixelated' }}
+              />
+              <span style={{ fontSize: 12, textAlign: 'center' }}>{c.name}</span>
             </button>
           ))}
         </div>
