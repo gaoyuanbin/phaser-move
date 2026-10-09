@@ -693,10 +693,21 @@ export default function PhaserGame() {
 
     gameRef.current = new Phaser.Game({
       type: Phaser.AUTO,
-      width: 1000,
-      height: 600,
       backgroundColor: '#1a1a2e',
       parent: containerRef.current,
+      // FIT scales the canvas down to whatever containerRef actually has
+      // room for (see its style below) instead of rendering at a fixed
+      // 1000x600 regardless of viewport, which clipped/overflowed the page
+      // on anything narrower than ~1140px. Game logic still runs in the same
+      // 1000x600 logical coordinate space (this.scale.width/height, pointer
+      // positions, etc. are all unaffected) - only the on-screen pixel size
+      // changes.
+      scale: {
+        mode: Phaser.Scale.FIT,
+        autoCenter: Phaser.Scale.CENTER_BOTH,
+        width: 1000,
+        height: 600,
+      },
     });
     gameRef.current.scene.add('HelloWorldScene', HelloWorldScene, true, { room, roomKind, onDoor: handleDoor, characters, character });
 
@@ -787,5 +798,8 @@ export default function PhaserGame() {
     );
   }
 
-  return <div ref={containerRef} />;
+  // Bounds what the Phaser FIT scaler above has to fit into: full width up to
+  // the game's native 1000x600, same aspect ratio, so it shrinks instead of
+  // overflowing on a narrow viewport.
+  return <div ref={containerRef} style={{ width: '100%', maxWidth: 1000, aspectRatio: '1000 / 600', margin: '0 auto' }} />;
 }
