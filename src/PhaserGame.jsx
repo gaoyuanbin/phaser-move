@@ -37,6 +37,15 @@ const STATUS_DOT_OFFSET_Y = -40;
 
 const POINTER_OFFSET = 50;
 
+// Ported from PygameFighting's own in-engine tutorial (STEPS list + practice
+// dummy). Unlike every other room kind, the tutorial is entirely local to
+// this client - no colyseus room, no network messages - since the dummy
+// never needs to be authoritative (it can't lose, doesn't attack back, and
+// nobody else ever sees it). Mirrors ArenaRoom's energy regen rate so the
+// "watch it refill" lesson plays out at the same pace as real combat.
+const TUTORIAL_ENERGY_REGEN_PER_SEC = 30;
+const TUTORIAL_DUMMY_MAX_HP = 80;
+
 // Ported from PygameFighting's data/game_settings.json ("music_volume": 0.4)
 // and assets/bg.png + assets/bgm.mp3.
 const MUSIC_VOLUME = 0.4;
@@ -50,6 +59,8 @@ class HelloWorldScene extends Phaser.Scene {
     this.room = data.room;
     this.roomKind = data.roomKind;
     this.onDoor = data.onDoor;
+    this.isTutorial = Boolean(data.tutorial);
+    this.onExitTutorial = data.onExitTutorial;
     // Character stats/visuals (speed, hp/energy caps, and each one's own
     // attack/superAttack/dash movesets) come from the server's
     // data/characters/*.json, fetched once before this scene is created -
@@ -74,14 +85,16 @@ class HelloWorldScene extends Phaser.Scene {
     this.events.once('shutdown', () => this.bgm.stop());
 
     this.doorTriggered = false;
-    const doorIsToArenas = this.roomKind === 'main';
-    this.door = this.add.rectangle(width - 50, height / 2, 60, 120, doorIsToArenas ? 0xffaa00 : 0x4488ff, 0.85);
-    this.add.text(
-      width - 130,
-      height / 2 - 70,
-      doorIsToArenas ? 'Door -> Arenas' : 'Door -> Main Lobby',
-      { fontSize: '10px', color: '#ffffff' }
-    );
+    if (!this.isTutorial) {
+      const doorIsToArenas = this.roomKind === 'main';
+      this.door = this.add.rectangle(width - 50, height / 2, 60, 120, doorIsToArenas ? 0xffaa00 : 0x4488ff, 0.85);
+      this.add.text(
+        width - 130,
+        height / 2 - 70,
+        doorIsToArenas ? 'Door -> Arenas' : 'Door -> Main Lobby',
+        { fontSize: '10px', color: '#ffffff' }
+      );
+    }
 
     this.hpbar = this.add.rectangle(width / 2, height / 2 + HP_BAR_OFFSET_Y, HP_BAR_WIDTH, HP_BAR_HEIGHT, 0x222222);
     this.curhp = this.add.rectangle(width / 2, height / 2 + HP_BAR_OFFSET_Y, HP_BAR_WIDTH, HP_BAR_HEIGHT, 0x22ff22);
@@ -110,6 +123,7 @@ class HelloWorldScene extends Phaser.Scene {
     // special move, F to block.
     this.specialKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.Z);
     this.blockKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.F);
+    this.enterKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.ENTER);
     this.helpKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.H);
     this.buildHelpOverlay(width, height);
     this.otherPlayers = {};
@@ -140,27 +154,48 @@ class HelloWorldScene extends Phaser.Scene {
     if (this.room) {
       this.setupRoom(this.room);
     }
+    if (this.isTutorial) {
+      this.setupTutorial(width, height);
+    }
   }
 
   tryAttack(attackId, time) {
-    if (!this.room || this.roomKind !== 'arena') return;
     const attack = this.attacks[attackId];
     if (!attack) return;
+
+    if (this.isTutorial) {
+      if (this.tutorialEnergy < attack.energyCost) return;
+      const wasFull = this.tutorialEnergy >= this.maxEnergy;
+      this.nextAttackTime = time + attack.cooldownMs;
+      this.tutorialEnergy = Math.max(0, this.tutorialEnergy - attack.energyCost);
+      this.setEnergyBar(this.tutorialEnergy);
+      if (attack.blinkDistance) this.blinkSelf(attack.blinkDistance);
+      this.showAttackEffect(attackId, this.player, this.facing);
+      this.resolveTutorialHit(attack);
+      this.onTutorialAction(attackId, wasFull);
+      return;
+    }
+
+    if (!this.room || this.roomKind !== 'arena') return;
     this.nextAttackTime = time + attack.cooldownMs;
     // Blink is purely a client-side instant reposition (like dash's own
     // movement) - the server's copy of this move has no hitbox or effects,
     // it only gates it on cooldown/energy and relays 'playerAttacked' so
     // other clients see the swing visual.
     if (attack.blinkDistance) {
-      const v = this.facingVector();
-      const hw = this.player.width / 2;
-      const hh = this.player.height / 2;
-      this.player.x = Phaser.Math.Clamp(this.player.x + v.x * attack.blinkDistance, hw, this.scale.width - hw);
-      this.player.y = Phaser.Math.Clamp(this.player.y + v.y * attack.blinkDistance, hh, this.scale.height - hh);
+      this.blinkSelf(attack.blinkDistance);
       this.room.send('move', { x: this.player.x, y: this.player.y });
     }
     this.room.send('attack', { attackId, direction: this.facing });
     this.showAttackEffect(attackId, this.player, this.facing);
+  }
+
+  blinkSelf(distance) {
+    const v = this.facingVector();
+    const hw = this.player.width / 2;
+    const hh = this.player.height / 2;
+    this.player.x = Phaser.Math.Clamp(this.player.x + v.x * distance, hw, this.scale.width - hw);
+    this.player.y = Phaser.Math.Clamp(this.player.y + v.y * distance, hh, this.scale.height - hh);
   }
 
   // `target` is a live game object (this.player, or a remote player's rect) -
@@ -191,8 +226,137 @@ class HelloWorldScene extends Phaser.Scene {
     switch (this.roomKind) {
       case 'arena': return 'Reduce another player\'s HP to zero to respawn them. Attacking costs energy, which regenerates over time.';
       case 'tag': return 'The yellow player is "it" - touch another player to pass it on to them. Just-tagged players are briefly immune.';
+      case 'tutorial': return 'Follow the prompts below to learn the controls.';
       default: return 'A shared hub with no combat. Walk into the glowing door to head to the Arena browser.';
     }
+  }
+
+  // ------------------------------------------------------------------ //
+  // Tutorial: ported from PygameFighting's own STEPS list + practice     //
+  // dummy. Entirely local - no room, no network - since the dummy is     //
+  // never authoritative (it can't lose, doesn't attack back, and         //
+  // nobody else ever sees it).                                          //
+  // ------------------------------------------------------------------ //
+
+  setupTutorial(width, height) {
+    this.statusText.setText('Tutorial');
+    this.tutorialEnergy = this.maxEnergy;
+
+    this.dummyHp = TUTORIAL_DUMMY_MAX_HP;
+    this.dummyRect = this.add.rectangle(width - 160, height / 2, 50, 50, 0x888888);
+    this.dummyHpBg = this.add.rectangle(width - 160, height / 2 + HP_BAR_OFFSET_Y, HP_BAR_WIDTH, HP_BAR_HEIGHT, 0x222222);
+    this.dummyHpFill = this.add.rectangle(width - 160, height / 2 + HP_BAR_OFFSET_Y, HP_BAR_WIDTH, HP_BAR_HEIGHT, 0xff5050);
+    this.add.text(width - 160, height / 2 - 45, 'DUMMY', { fontSize: '11px', color: '#cccccc' }).setOrigin(0.5);
+
+    this.tutorialSteps = this.buildTutorialSteps();
+    this.tutorialStepIndex = 0;
+    this.tutorialStepDone = false;
+    this.buildTutorialUI(width, height);
+    this.updateTutorialUI();
+  }
+
+  // One-line auto-description for a character's "special" move, generated
+  // from its own effects rather than a hand-maintained description per
+  // character (there are 10 of them, each with a different ability).
+  describeSpecial(attack) {
+    if (attack.blinkDistance) {
+      return `Instantly teleport ${attack.blinkDistance}px in your facing direction. No damage - pure repositioning.`;
+    }
+    const dmg = attack.effects?.find((e) => e.type === 'damage')?.amount;
+    const statuses = (attack.effects || []).filter((e) => ['stun', 'slow', 'poison', 'regen'].includes(e.type)).map((e) => e.type);
+    let text = dmg ? `Deals ${dmg} damage.` : 'A support move.';
+    if (statuses.length) text += ` Also applies ${statuses.join(' and ')}.`;
+    return text;
+  }
+
+  buildTutorialSteps() {
+    const steps = [
+      { title: 'Movement', body: 'Use WASD or Arrow Keys to move.', hint: 'Move in any direction to continue.', action: 'move' },
+      { title: 'Attack', body: 'Press E or / for a quick attack.', hint: 'Press E or / to continue.', action: 'key', attackId: 'attack' },
+      { title: 'Dash', body: 'Press Space, Q, or Shift to dash forward and strike.', hint: 'Press Space, Q, or Shift to continue.', action: 'key', attackId: 'dash' },
+      { title: 'Super Attack', body: 'Press R or . for a powerful long-range attack.', hint: 'Press R or . to continue.', action: 'key', attackId: 'superAttack' },
+      { title: 'Block', body: 'Press F to block and reduce incoming damage.', hint: 'Press F to continue.', action: 'key', attackId: 'block' },
+    ];
+    const special = this.attacks.special;
+    if (special) {
+      steps.push({
+        title: `Special: ${this.characters[this.myCharacter]?.name ?? 'Your character'}`,
+        body: this.describeSpecial(special),
+        hint: 'Press Z to continue.',
+        action: 'key',
+        attackId: 'special',
+      });
+    }
+    steps.push(
+      { title: 'Energy Bar', body: 'The yellow bar is your energy. Attacks cost energy and regenerate over time.', hint: '', action: 'energy', attackId: 'attack' },
+      { title: 'Practice Fight!', body: "Defeat the dummy using everything you've learned.\nIt won't fight back.", hint: "Reduce the dummy's HP to zero.", action: 'kill_dummy' },
+      { title: 'Tutorial Complete!', body: "You're ready to fight!\nPress ENTER to return to the menu.", hint: '', action: 'enter' },
+    );
+    return steps;
+  }
+
+  buildTutorialUI(width, height) {
+    const boxWidth = width - 40;
+    const boxHeight = 140;
+    const boxY = height - boxHeight - 10;
+    this.tutorialBox = this.add.rectangle(width / 2, boxY + boxHeight / 2, boxWidth, boxHeight, 0x000000, 0.8)
+      .setStrokeStyle(2, 0x6496ff, 1).setDepth(90);
+    this.tutorialTitle = this.add.text(30, boxY + 10, '', { fontSize: '18px', color: '#64c8ff', fontStyle: 'bold' }).setDepth(91);
+    this.tutorialBody = this.add.text(30, boxY + 44, '', {
+      fontSize: '14px', color: '#e6e6e6', lineSpacing: 6, wordWrap: { width: boxWidth - 60 },
+    }).setDepth(91);
+    this.tutorialHint = this.add.text(30, boxY + boxHeight - 26, '', { fontSize: '13px', color: '#a0ffa0' }).setDepth(91);
+  }
+
+  updateTutorialUI() {
+    const step = this.tutorialSteps[this.tutorialStepIndex];
+    if (!step) return;
+    const isSpecial = step.attackId === 'special';
+    this.tutorialBox.setStrokeStyle(2, isSpecial ? 0xc864ff : 0x6496ff, 1);
+    this.tutorialTitle.setColor(isSpecial ? '#c878ff' : '#64c8ff');
+    this.tutorialTitle.setText(`[${this.tutorialStepIndex + 1}/${this.tutorialSteps.length}]  ${step.title}`);
+    this.tutorialBody.setText(step.body);
+    let hint = step.hint;
+    if (step.action === 'energy') {
+      hint = this.tutorialEnergy >= this.maxEnergy ? 'Energy full - press E to continue.' : 'Watch the energy bar refill, then press E.';
+    }
+    this.tutorialHint.setText(hint);
+  }
+
+  completeTutorialStep() {
+    this.tutorialStepDone = true;
+    this.tutorialStepIndex = Math.min(this.tutorialStepIndex + 1, this.tutorialSteps.length - 1);
+    this.tutorialStepDone = false;
+    this.updateTutorialUI();
+  }
+
+  // Called after an attack actually fires (cooldown/energy already passed).
+  // `wasFull` is whether energy was already at max *before* this cast spent
+  // any - the "Energy Bar" step cares about catching it full, not draining it.
+  onTutorialAction(attackId, wasFull) {
+    const step = this.tutorialSteps[this.tutorialStepIndex];
+    if (!step || this.tutorialStepDone) return;
+    if (step.action === 'key' && step.attackId === attackId) {
+      this.completeTutorialStep();
+    } else if (step.action === 'energy' && step.attackId === attackId && wasFull) {
+      this.completeTutorialStep();
+    }
+  }
+
+  // Only "damage" matters against the dummy - it never moves and has no
+  // status effects to worry about, so knockback/stun/etc. are irrelevant here.
+  resolveTutorialHit(attack) {
+    if (!this.dummyRect || this.dummyHp <= 0 || attack.selfCast) return;
+    const dir = this.facing === 'left' ? -1 : 1;
+    const hitboxX = this.player.x + dir * (attack.range / 2);
+    const dx = Math.abs(this.dummyRect.x - hitboxX);
+    const dy = Math.abs(this.dummyRect.y - this.player.y);
+    if (dx > attack.range / 2 + this.player.width / 2 || dy > attack.height / 2 + this.player.height / 2) return;
+    const dmg = attack.effects?.find((e) => e.type === 'damage')?.amount || 0;
+    if (!dmg) return;
+    this.dummyHp = Math.max(0, this.dummyHp - dmg);
+    this.dummyHpFill.setDisplaySize(HP_BAR_WIDTH * (this.dummyHp / TUTORIAL_DUMMY_MAX_HP), HP_BAR_HEIGHT);
+    this.dummyHpFill.x = this.dummyRect.x - (HP_BAR_WIDTH - this.dummyHpFill.displayWidth) / 2;
   }
 
   buildHelpOverlay(width, height) {
@@ -466,9 +630,24 @@ class HelloWorldScene extends Phaser.Scene {
     this.room.send('sayHi', { x: this.player.x, y: this.player.y });
   }
 
-  update(time) {
+  update(time, delta) {
     if (Phaser.Input.Keyboard.JustDown(this.helpKey)) {
       this.toggleHelp();
+    }
+
+    if (this.isTutorial) {
+      this.tutorialEnergy = Math.min(this.maxEnergy, this.tutorialEnergy + TUTORIAL_ENERGY_REGEN_PER_SEC * (delta / 1000));
+      this.setEnergyBar(this.tutorialEnergy);
+      this.updateTutorialUI();
+
+      const step = this.tutorialSteps[this.tutorialStepIndex];
+      if (step?.action === 'kill_dummy' && this.dummyHp <= 0) {
+        this.completeTutorialStep();
+      }
+      if (step?.action === 'enter' && Phaser.Input.Keyboard.JustDown(this.enterKey)) {
+        this.onExitTutorial?.();
+        return;
+      }
     }
 
     for (const { swing, target, offset } of this.activeEffects) {
@@ -494,6 +673,10 @@ class HelloWorldScene extends Phaser.Scene {
       if (this.cursors.right.isDown || this.wasd.right.isDown) { this.player.x += speed; moved = true; this.facing = 'right'; }
       if (this.cursors.up.isDown || this.wasd.up.isDown) { this.player.y -= speed; moved = true; this.facing = "up"}
       if (this.cursors.down.isDown || this.wasd.down.isDown) { this.player.y += speed; moved = true; this.facing = "down"}
+    }
+    if (this.isTutorial && moved && !this.tutorialStepDone) {
+      const step = this.tutorialSteps[this.tutorialStepIndex];
+      if (step?.action === 'move') this.completeTutorialStep();
     }
     this.setStatusDots(this, this.player.x, this.player.y, this.myStatusEffects);
     const hw = this.player.width / 2;
@@ -540,9 +723,17 @@ class HelloWorldScene extends Phaser.Scene {
       this.dashEndTime = time + DASH_DURATION_MS;
       this.actionLockEndTime = this.dashEndTime + DASH_END_LAG_MS;
       this.showDashEffect(this.player.x, this.player.y);
-      // Dashing through an opponent only deals damage in arenas - ArenaRoom is the
-      // only room that registers an "attack" handler, so this is a no-op elsewhere.
-      if (this.room && this.roomKind === 'arena') {
+      const dashAttack = this.attacks.dash;
+      if (this.isTutorial && dashAttack && this.tutorialEnergy >= dashAttack.energyCost) {
+        const wasFull = this.tutorialEnergy >= this.maxEnergy;
+        this.tutorialEnergy = Math.max(0, this.tutorialEnergy - dashAttack.energyCost);
+        this.setEnergyBar(this.tutorialEnergy);
+        this.showAttackEffect('dash', this.player, this.facing);
+        this.resolveTutorialHit(dashAttack);
+        this.onTutorialAction('dash', wasFull);
+        // Dashing through an opponent only deals damage in arenas - ArenaRoom is the
+        // only room that registers an "attack" handler, so this is a no-op elsewhere.
+      } else if (this.room && this.roomKind === 'arena') {
         this.room.send('attack', { attackId: 'dash', direction: this.facing });
         // The trail above is centered on the player; also show the actual
         // front-offset hitbox from dash.json, same as tryAttack() does for
@@ -565,6 +756,7 @@ export default function PhaserGame() {
 
   const [room, setRoom] = useState(null);
   const [roomKind, setRoomKind] = useState(null); // 'main' | 'arena'
+  const [tutorial, setTutorial] = useState(false); // local-only, no room - see HelloWorldScene.setupTutorial
   const [character, setCharacter] = useState(null);
   const [arenas, setArenas] = useState([]);
   const [characters, setCharacters] = useState(null);
@@ -687,9 +879,10 @@ export default function PhaserGame() {
     }
   }, [roomKind, client, character]);
 
-  // Mount the Phaser game once a room has been picked/created and character data has loaded.
+  // Mount the Phaser game once a room has been picked/created (or Tutorial
+  // was chosen, which needs no room at all) and character data has loaded.
   useEffect(() => {
-    if (!room || !characters) return;
+    if ((!room && !tutorial) || !characters) return;
 
     gameRef.current = new Phaser.Game({
       type: Phaser.AUTO,
@@ -709,7 +902,10 @@ export default function PhaserGame() {
         height: 600,
       },
     });
-    gameRef.current.scene.add('HelloWorldScene', HelloWorldScene, true, { room, roomKind, onDoor: handleDoor, characters, character });
+    gameRef.current.scene.add('HelloWorldScene', HelloWorldScene, true, {
+      room, roomKind: tutorial ? 'tutorial' : roomKind, onDoor: tutorial ? undefined : handleDoor, characters, character,
+      tutorial, onExitTutorial: () => setTutorial(false),
+    });
 
     setTimeout(() => {
       const canvas = containerRef.current?.querySelector('canvas');
@@ -717,13 +913,13 @@ export default function PhaserGame() {
     }, 500);
 
     return () => {
-      room.leave();
+      room?.leave();
       gameRef.current?.destroy(true);
       gameRef.current = null;
     };
-  }, [room, roomKind, characters, handleDoor, character]);
+  }, [room, roomKind, tutorial, characters, handleDoor, character]);
 
-  if (!room) {
+  if (!room && !tutorial) {
     return (
       <div style={{ color: '#fff', fontFamily: 'sans-serif', padding: 20, maxWidth: 480 }}>
         <div style={{ background: '#22222e', border: '1px solid #444', borderRadius: 8, padding: 16 }}>
@@ -761,7 +957,11 @@ export default function PhaserGame() {
           ))}
         </div>
 
-        <h2 style={{ marginTop: 24 }}>Main Lobby</h2>
+        <h2 style={{ marginTop: 24 }}>Tutorial</h2>
+        <p style={{ opacity: 0.7, fontSize: 14 }}>Learn the controls against a practice dummy that won't fight back. No other players involved.</p>
+        <button className={styles.menu} disabled={!characters} onClick={() => setTutorial(true)}>Start Tutorial</button>
+
+        <h2 style={{ marginTop: 32 }}>Main Lobby</h2>
         <p style={{ opacity: 0.7, fontSize: 14 }}>One shared room. Attacking is disabled here.</p>
         <button className = {styles.menu} disabled={busy || !characters} onClick={joinMainLobby}>{busy ? 'Connecting…' : 'Join Main Lobby'}</button>
 
